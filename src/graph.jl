@@ -145,3 +145,99 @@ abs(a::Variable) = apply(Abs(), [a])
 .-(a::Variable, b::Variable) = apply(Sub(), [a, b])
 .*(a::Variable, b::Variable) = apply(Mul(), [a, b])
 ./(a::Variable, b::Variable) = apply(Div(), [a, b])
+
+
+# Autodiff
+function grad(out, wrt)
+
+end
+
+######
+# Graph operations
+######
+
+function connected(node::Node)
+    queue = Vector{Node}([node])
+    seen = Set{Node}([node])
+    while !isempty(queue)
+        cur = pop!(queue)
+        prev = pred(cur)
+        next = succ(cur)
+        # Would like the chain(.) function
+        for n in prev
+            if !(n in seen)
+                push!(seen, n)
+                push!(queue, n)
+            end
+        end
+        for n in next
+            if !(n in seen)
+                push!(seen, n)
+                push!(queue, n)
+            end
+        end
+    end
+    seen
+end
+
+function pred(node::Apply)
+    node.inputs
+end
+
+function pred(node::Variable)
+    isnull(node.owner) ? [] : [get(node.owner)]
+end
+
+function succ(node::Apply)
+    [node.output]
+end
+
+function succ(node::Variable)
+    node.clients
+end
+
+function label(node::Apply)
+    string(typeof(node.op))
+end
+
+function label(node::Variable)
+    string(typeof(node.data))
+end
+
+# Print connected component of node
+function toDot(node::Node)
+    nodes = connected(node)
+    nodeIds = Dict{Node, Int}()
+    id = 0
+    for node in nodes
+        nodeIds[node] = id
+        id += 1
+    end
+
+    labels = Vector{AbstractString}()
+    edges = Vector{AbstractString}()
+    for node in nodes
+        thisId = nodeIds[node]
+        shape = typeof(node) == Apply ? "box" : "ellipse"
+        labelLine = string(thisId, " [shape=\"", shape,"\", label=\"", label(node), "\"];")
+        push!(labels, labelLine)
+        for next in succ(node)
+            edge = "$(nodeIds[node]) -> $(nodeIds[next]);"
+            push!(edges, edge)
+        end
+    end
+
+    string("digraph computation {\n",
+           join(labels,"\n"),
+           "\n",
+           join(edges,"\n"),
+           "\n}"
+           )
+end
+
+# for op = (:+, :-, :*, :/)
+#   @eval ($op)(a::Variable, b::Variable) = opn{Tensor}(BinOp(op), a, b)
+# end
+
+
+## Functions CGT implements
