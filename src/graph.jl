@@ -7,12 +7,17 @@ abstract Node
 abstract VarType
 abstract OpType
 
+immutable Graph
+    nodes::Set{Node}
+end
+
 # OpType - specifies operator (e.g. mul, rand, zeros)
 #type Apply{T <: OpType} <: Node
 type Apply <: Node
     op::OpType
     inputs::Vector{Node}
     output::Node
+    name::Nullable{AbstractString}
 end
 
 #type Variable{V <: VarType} <: Node
@@ -20,15 +25,19 @@ type Variable <: Node
     owner::Nullable{Apply}
     clients::Vector{Apply}
     data::VarType
+    name::Nullable{AbstractString}
 end
 
-function Variable(data::VarType)
-    Variable(Nullable(), [], data)
+function Variable(data::VarType, name::AbstractString="")
+    #newName = length(name) == 0 ? Nullable() : Nullable(name)
+    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
+    Variable(Nullable(), [], data, newName)
 end
 
-function apply(op::OpType, inputs::Vector{Variable})
+function apply(op::OpType, inputs::Vector{Variable}, name::AbstractString="")
+    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
     var = Variable(TensorVar())
-    apply = Apply(op, inputs, var)
+    apply = Apply(op, inputs, var, newName)
     var.owner = apply
     for i in inputs
         push!(i.clients, apply)
@@ -68,8 +77,9 @@ type TensorConstant <: Tensor
     shape::Vector{Int}
 end
 
+
 type Input <: Tensor
-    shape::Vector{Int}
+    #shape::Vector{Int}
 end
 
 type TensorVar <: Tensor
@@ -89,14 +99,13 @@ abstract ConstantOp <: CreateOp
 type Zeros <: ConstantOp end
 type Ones <: ConstantOp end
 type Fill <: ConstantOp end
-type Constant <: ConstantOp end
 
-function constant(val::Real)
-    Variable(TensorConstant([val], [1,1]))
+function constant(val::Real, name::AbstractString="")
+    Variable(TensorConstant([val], [1,1]), name)
     #Variable{TensorConstant}([val], [1,1])
 end
 
-function constant(val::Array)
+function constant(val::Array, name::AbstractString)
     Variable(TensorConstant(val, collect(size(val))))
 end
 
@@ -112,14 +121,9 @@ function ones(shape::Array{Int})
     fill(shape, 1)
 end
 
-function input(shape)
-    Variable(Input(shape))
+function input()
+    Variable(Input())
 end
-
-# Matrix math
-type MatMul <: OpType end
-type MatAdd <: OpType end
-type MatSub <: OpType end
 
 # Elementwise
 abstract ElementWise <: OpType
@@ -127,15 +131,23 @@ type Add <: ElementWise end
 type Sub <: ElementWise end
 type Mul <: ElementWise end
 type Div <: ElementWise end
-type Mod <: ElementWise end
+
+# Matrix math
+type MatAdd <: OpType end
+type MatSub <: OpType end
+type MatMul <: OpType end
 
 # Unary operations
 abstract UnOp <: OpType
-type Abs <: UnOp end
 type Neg <: UnOp end
 
-abs(a::Variable) = apply(Abs(), [a])
+type Transpose <: UnOp end
+
+
 -(a::Variable) = apply(Neg(), [a])
+Neg(a::Variable) = apply(Neg(), [a])
+
+t(a::Variable) = apply(Transpose(), [a])
 
 +(a::Variable, b::Variable) = apply(MatAdd(), [a, b])
 -(a::Variable, b::Variable) = apply(MatSub(), [a, b])
@@ -146,38 +158,127 @@ abs(a::Variable) = apply(Abs(), [a])
 .*(a::Variable, b::Variable) = apply(Mul(), [a, b])
 ./(a::Variable, b::Variable) = apply(Div(), [a, b])
 
+### Gradients
+# Return vector of variables, where ith is result of gradient wrt input i
+function grad(op::Add, inputs::Vector{Variable}, grad_out::Variable)
+    [grad_out, grad_out]
+end
+
+function grad(op::Sub, inputs::Vector{Variable}, grad_out::Variable)
+    res = -grad_out
+    [res, res]
+end
+
+function grad(op::Mul, inputs::Vector{Variable}, grad_out::Variable)
+    [inputs[1] .* grad_out, inputs[2] .* grad_out]
+end
+
+function grad(op::Div, inputs::Vector{Variable}, grad_out::Variable)
+    [grad_out ./ inputs[1], grad_out ./ inputs[2]]
+end
+
+function grad(op::MatAdd, inputs::Vector{Variable}, grad_out::Variable)
+    [grad_out, grad_out]
+end
+
+function grad(op::MatSub, inputs::Vector{Variable}, grad_out::Variable)
+    [grad_out ./ inputs[1], grad_out ./ inputs[2]]
+end
+
+function grad(op::MatMul, inputs::Vector{Variable}, grad_out::Variable)
+    [grad_out * t(inputs[2]), grad_out * t(inputs[1])]
+end
+
+function grad(op::Neg, inputs::Vector{Variable}, grad_out::Variable)
+    [-grad_out]
+end
+
+function grad(op::Transpose, inputs::Vector{Variable}, grad_out::Variable)
+    [grad_out]
+end
 
 # Autodiff
 function grad(out, wrt)
+    
+end
 
+######
+# Interpret
+######
+
+function interpret(outputs::Vector{Variable}, input_nodes::Vector{Input}, arguments::Vector{Array{Float}})
+    @assert length(input_nodes) == length(arguments)
+    frontier = Vector{Apply}()
+    values = Dict{Variable, Array{Float}}()
+    graph = Graph(input_nodes)
+
+    for node = graph.nodes
+        if typeof(node) == Input && not(node in input_nodes)
+            @assert false && "Every input node must have a value"
+        elseif isnull(node.owner)
+            @assert false && "Every noninput node must have a parent"
+        end
+    end
 end
 
 ######
 # Graph operations
 ######
 
-function connected(node::Node)
-    queue = Vector{Node}([node])
-    seen = Set{Node}([node])
-    while !isempty(queue)
-        cur = pop!(queue)
+function dfs(seen::Vector{Node})
+    # WRITE THIS
+end
+
+function toposort(graph::Graph)
+    result = Vector{Node}()
+    marks = Dict{Node, Symbol}() # :marked, :temp
+    function visit(cur::Node)
+        mark = get(marks, cur, :unmarked)
+        if isequal(mark, :temp)
+            @assert false && "Graph is not a DAG!"
+            return
+        elseif isequal(mark, :unmarked)
+            marks[cur] = :temp
+            for child = succ(cur)
+                visit(child)
+            end
+            marks[cur] = :marked
+            push!(result, cur)
+        end
+    end
+
+    for node = graph.nodes
+        if isequal(get(marks, node, :unmarked), :unmarked)
+            visit(node)
+        end
+    end
+    reverse!(result)
+    result
+end
+
+# Return graph consisting of all nodes connected to given Variables
+function getGraph(nodes::Vector{Variable})
+    stack = Vector{Node}(nodes)
+    seen = Set{Node}(nodes)
+    while !isempty(stack)
+        cur = pop!(stack)
         prev = pred(cur)
         next = succ(cur)
         # Would like the chain(.) function
         for n in prev
             if !(n in seen)
                 push!(seen, n)
-                push!(queue, n)
+                push!(stack, n)
             end
         end
         for n in next
             if !(n in seen)
                 push!(seen, n)
-                push!(queue, n)
+                push!(stack, n)
             end
         end
     end
-    seen
+    Graph(seen)
 end
 
 function pred(node::Apply)
@@ -233,6 +334,27 @@ function toDot(node::Node)
            join(edges,"\n"),
            "\n}"
            )
+end
+
+function toString(node::Variable)
+    if !(isnull(node.name))
+        return "$(get(node.name)): $(typeof(node.data))"
+    else
+        return "$(typeof(node.data))"
+    end
+end
+
+function toString(node::Apply)
+    if !(isnull(node.name))
+        return "$(get(node.name)): $(typeof(node.op))"
+    else
+        return "$(typeof(node.op))"
+    end
+end
+
+function toString{T <: Node}(nodes::Vector{T})
+    c = ", "
+    "[$(join(map(toString, nodes), c))]"
 end
 
 # for op = (:+, :-, :*, :/)
