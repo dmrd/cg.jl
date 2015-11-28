@@ -71,8 +71,6 @@ function apply(op::OpType, inputs::Vector{Variable}, name::AbstractString="")
     var
 end
 
-
-
 ########
 # Variable Types
 ########
@@ -229,7 +227,7 @@ function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
     on_path = intersect(upstream, downstream)
 
     toposorted = toposort(graph)
-    node_to_grad = Dict{Variable, Variable}(out => out)
+    node_to_grad = Dict{Variable, Variable}(out => (out ./ out))
     for node = reverse(toposorted)
         if !(node in on_path)
             continue
@@ -369,10 +367,11 @@ function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
     result
 end
 
+# This is super hacky
 function numeric_grad(f::Func, x::AbstractArray, eps=0.001)
     (res1, ) = interpret(f, (x - eps,))
     (res2, ) = interpret(f, (x + eps,))
-    return (res2 - res1) / 2eps
+    return (res2 - res1) / (2eps * length(x))
 end
 
 ## TODO: Transform to straight Julia source code
