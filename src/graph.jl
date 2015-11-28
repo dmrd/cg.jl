@@ -30,6 +30,21 @@ type Variable <: Node
     name::Nullable{AbstractString}
 end
 
+type Func
+    graph::Graph
+    outputs::Vector{Variable}
+    inputs::Vector{Variable}
+    defaults::Dict{Variable, Any}
+end
+
+function Func(outputs::Vector{Variable})
+    Func(getGraph(outputs), outputs, Vector{Variable}(), Dict{Variable, AbstractArray}())
+end
+
+function Func(outputs::Vector{Variable}, inputs::Vector{Variable})
+    Func(getGraph(union(outputs, inputs)), outputs, inputs, Dict{Variable, AbstractArray}())
+end
+
 inputs(n::Apply{Variable}) = n.inputs #::Vector{Variable} # Type weirdness
 output(n::Apply{Variable}) = n.output::Variable
 
@@ -138,6 +153,7 @@ end
 
 # Elementwise
 abstract ElementWise <: OpType
+# So .+ and + are technically different, but just use + and - for now
 type Add <: ElementWise end
 type Sub <: ElementWise end
 type Mul <: ElementWise end
@@ -266,8 +282,8 @@ end
 # Operations implementations
 ######
 
-op(op::Add, a::AbstractArray, b::AbstractArray) = a .+ b
-op(op::Sub, a::AbstractArray, b::AbstractArray) = a .- b
+op(op::Add, a::AbstractArray, b::AbstractArray) = a + b
+op(op::Sub, a::AbstractArray, b::AbstractArray) = a - b
 op(op::Mul, a::AbstractArray, b::AbstractArray) = a .* b
 op(op::Div, a::AbstractArray, b::AbstractArray) = a ./ b
 
@@ -285,23 +301,28 @@ op(op::Transpose, a::AbstractArray) = transpose(a)
 # Interpret
 ######
 
-# Super slow interpret function
-# 
-function interpret(graph::Graph, outputs::Vector{Variable})
-    interpret(graph::Graph, outputs::Vector{Variable}, Vector{Input}(), Tuple{AbstractArray}())
+# Super slow interpret functions
+function interpret(f::Func, arguments::Tuple{AbstractArray})
+    @assert length(f.inputs) == length(arguments)
+    args = Dict{Variable, AbstractArray}()
+    for (input, arg) = zip(f.inputs, arguments)
+        args[input] = arg
+    end
+    interpret(f, args)
 end
-function interpret(graph::Graph, outputs::Vector{Variable}, input_nodes::Vector{Variable}, arguments::Tuple{AbstractArray})
-    @assert length(input_nodes) == length(arguments)
-    for input_node = input_nodes
+
+function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
+    @assert length(f.inputs) == length(union(keys(arguments), keys(f.defaults)))
+    for input_node = f.inputs
         @assert isa(input_node.data, Input)
     end
     frontier = Vector{Apply{Variable}}()
-    values = Dict{Variable, Array{Float}}()
+    values = Dict{Variable, AbstractArray{Float}}()
 
-    for node = graph.nodes
+    for node = f.graph.nodes
         if isa(node, Variable)
             if isa(node.data, Input)
-                @assert (node in input_nodes) # "Every input node must have a value"
+                @assert (node in f.inputs) # "Every input node must have a value"
             elseif isnull(node.owner) && !isa(node.data, TensorConstant)
                 print(toString(node))
                 @assert false && "Every noninput node must have a parent"
@@ -310,11 +331,11 @@ function interpret(graph::Graph, outputs::Vector{Variable}, input_nodes::Vector{
     end
 
     # Set inputs
-    for (node, value) = zip(input_nodes, arguments)
-        values[node] = value
+    for node = f.inputs
+        values[node] = arguments[node]
     end
 
-    order = toposort(graph)
+    order = toposort(f.graph)
     for node = order
         if isa(node, Variable)
             if isa(node.data, TensorConstant)
@@ -341,11 +362,17 @@ function interpret(graph::Graph, outputs::Vector{Variable}, input_nodes::Vector{
         end
     end
     result = []
-    for arg = outputs
+    for arg = f.outputs
         @assert haskey(values, arg)
         push!(result, get(values, arg, :impossible))
     end
     result
+end
+
+function numeric_grad(f::Func, x::AbstractArray, eps=0.001)
+    (res1, ) = interpret(f, (x - eps,))
+    (res2, ) = interpret(f, (x + eps,))
+    return (res2 - res1) / 2eps
 end
 
 ## TODO: Transform to straight Julia source code
