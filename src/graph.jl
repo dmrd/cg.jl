@@ -101,6 +101,7 @@ end
 
 
 
+
 # Create
 
 abstract CreateOp <: OpType
@@ -115,8 +116,8 @@ function constant(val::Real, name::AbstractString="")
     #Variable{TensorConstant}([val], [1,1])
 end
 
-function constant(val::Array, name::AbstractString)
-    Variable(TensorConstant(val, collect(size(val))))
+function constant(val::AbstractArray, name::AbstractString="")
+    Variable(TensorConstant(val, collect(size(val))), name)
 end
 
 function fill(shape::Array{Int}, val)
@@ -131,8 +132,8 @@ function ones(shape::Array{Int})
     fill(shape, 1)
 end
 
-function input()
-    Variable(Input())
+function input(name::AbstractString="")
+    Variable(Input(), name)
 end
 
 # Elementwise
@@ -143,8 +144,6 @@ type Mul <: ElementWise end
 type Div <: ElementWise end
 
 # Matrix math
-type MatAdd <: OpType end
-type MatSub <: OpType end
 type MatMul <: OpType end
 
 # Unary operations
@@ -161,14 +160,12 @@ Neg(a::Variable) = apply(Neg(), [a])
 
 t(a::Variable) = apply(Transpose(), [a])
 
-+(a::Variable, b::Variable) = apply(MatAdd(), [a, b])
--(a::Variable, b::Variable) = apply(MatSub(), [a, b])
-*(a::Variable, b::Variable) = apply(MatMul(), [a, b])
 
-.+(a::Variable, b::Variable) = apply(Add(), [a, b])
-.-(a::Variable, b::Variable) = apply(Sub(), [a, b])
 .*(a::Variable, b::Variable) = apply(Mul(), [a, b])
 ./(a::Variable, b::Variable) = apply(Div(), [a, b])
++(a::Variable, b::Variable) = apply(Add(), [a, b])
+-(a::Variable, b::Variable) = apply(Sub(), [a, b])
+*(a::Variable, b::Variable) = apply(MatMul(), [a, b])
 
 .=(a::Variable, b::Variable) = apply(Assign(), [a, b])
 
@@ -188,14 +185,6 @@ function grad(op::Mul, inputs::Vector{Variable}, grad_out::Variable)
 end
 
 function grad(op::Div, inputs::Vector{Variable}, grad_out::Variable)
-    [grad_out ./ inputs[1], grad_out ./ inputs[2]]
-end
-
-function grad(op::MatAdd, inputs::Vector{Variable}, grad_out::Variable)
-    [grad_out, grad_out]
-end
-
-function grad(op::MatSub, inputs::Vector{Variable}, grad_out::Variable)
     [grad_out ./ inputs[1], grad_out ./ inputs[2]]
 end
 
@@ -274,40 +263,93 @@ function influenced_by(nodes::Vector{Variable}, child::Bool)
 end
 
 ######
-# Operations
+# Operations implementations
 ######
+
+op(op::Add, a::AbstractArray, b::AbstractArray) = a .+ b
+op(op::Sub, a::AbstractArray, b::AbstractArray) = a .- b
+op(op::Mul, a::AbstractArray, b::AbstractArray) = a .* b
+op(op::Div, a::AbstractArray, b::AbstractArray) = a ./ b
+
+op(op::MatMul, a::AbstractArray, b::AbstractArray) = a * b
+op(op::MatMul, a::Real, b::AbstractArray) = a * b
+op(op::MatMul, a::AbstractArray, b::Real) = a * b
+op(op::MatMul, a::Real, b::Real) = a * b
+
+op(op::Neg, a::AbstractArray) = -a
+
+op(op::Transpose, a::AbstractArray) = transpose(a)
 
 
 ######
 # Interpret
 ######
 
-
-function interpret(graph::Graph, outputs::Vector{Variable}, input_nodes::Vector{Input}, arguments::Vector{Array{Float}})
+# Super slow interpret function
+# 
+function interpret(graph::Graph, outputs::Vector{Variable})
+    interpret(graph::Graph, outputs::Vector{Variable}, Vector{Input}(), Tuple{AbstractArray}())
+end
+function interpret(graph::Graph, outputs::Vector{Variable}, input_nodes::Vector{Variable}, arguments::Tuple{AbstractArray})
     @assert length(input_nodes) == length(arguments)
+    for input_node = input_nodes
+        @assert isa(input_node.data, Input)
+    end
     frontier = Vector{Apply{Variable}}()
     values = Dict{Variable, Array{Float}}()
-    graph = Graph(input_nodes)
 
     for node = graph.nodes
-        if typeof(node) == Input && not(node in input_nodes)
-            @assert false && "Every input node must have a value"
-        elseif isnull(node.owner)
-            @assert false && "Every noninput node must have a parent"
+        if isa(node, Variable)
+            if isa(node.data, Input)
+                @assert (node in input_nodes) # "Every input node must have a value"
+            elseif isnull(node.owner) && !isa(node.data, TensorConstant)
+                print(toString(node))
+                @assert false && "Every noninput node must have a parent"
+            end
         end
     end
 
-    order = toposorted(graph)
+    # Set inputs
+    for (node, value) = zip(input_nodes, arguments)
+        values[node] = value
+    end
+
+    order = toposort(graph)
     for node = order
         if isa(node, Variable)
-            
+            if isa(node.data, TensorConstant)
+                values[node] = node.data.value
+            end
+            @assert haskey(values, node)
         elseif isa(node, Apply)
-
+            args = []
+            for arg = inputs(node)
+                @assert haskey(values, arg)
+                push!(args, get(values, arg, :impossible))
+            end
+            len = length(args)
+            if len == 0
+                out = op(node.op)
+            elseif len == 1
+                out = op(node.op, args[1])
+            elseif len == 2
+                out = op(node.op, args[1], args[2])
+            else
+                @assert "We have ops with more args now!?"
+            end
+            values[node.output] = out
         end
     end
+    result = []
+    for arg = outputs
+        @assert haskey(values, arg)
+        push!(result, get(values, arg, :impossible))
+    end
+    result
 end
 
 ## TODO: Transform to straight Julia source code
+# Time to learn some metaprogramming!
 
 ######
 # Graph operations
