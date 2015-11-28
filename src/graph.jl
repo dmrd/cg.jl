@@ -3,17 +3,22 @@ importall Base.Operators
 
 typealias Float Float32
 
+######
+# Basic types
+#####
+
 abstract Node
 abstract VarType
 abstract OpType
 
+# TODO: Make this graph container more powerful / actually do something
 immutable Graph
     nodes::Set{Node}
 end
 
-# OpType - specifies operator (e.g. mul, rand, zeros)
 # The lack of mutually recursive types is annoying
-#type Apply <: Node
+# Use T <: Node and Apply{Variable} instead
+# TODO: Is there a better way to do this?
 type Apply{T <: Node} <: Node
     op::OpType
     inputs::Vector{T}
@@ -22,7 +27,6 @@ type Apply{T <: Node} <: Node
 end
 
 
-#type Variable{V <: VarType} <: Node
 type Variable <: Node
     owner::Nullable{Apply}
     clients::Vector{Apply}
@@ -30,7 +34,25 @@ type Variable <: Node
     name::Nullable{AbstractString}
 end
 
-type Func
+function Variable(data::VarType, name::AbstractString="")
+    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
+    Variable(Nullable(), [], data, newName)
+end
+
+# Accessors
+# TODO: Are accessors considered good style instead of accessing directly?
+inputs(n::Apply{Variable}) = n.inputs::Vector{Variable}
+output(n::Apply{Variable}) = n.output::Variable
+
+pred(n::Apply{Variable}) = n.inputs::Vector{Variable}
+succ(n::Apply{Variable}) = [n.output]::Vector{Variable}
+
+#pred(n::Variable) = (isnull(n.owner) ? []::Vector{Apply} : [get(n.owner)])::Vector{Apply}
+pred(n::Variable) = isnull(n.owner) ? [] : [get(n.owner)]
+succ(n::Variable) = n.clients::Vector{Apply}
+
+
+immutable Func
     graph::Graph
     outputs::Vector{Variable}
     inputs::Vector{Variable}
@@ -45,21 +67,13 @@ function Func(outputs::Vector{Variable}, inputs::Vector{Variable})
     Func(getGraph(union(outputs, inputs)), outputs, inputs, Dict{Variable, AbstractArray}())
 end
 
-inputs(n::Apply{Variable}) = n.inputs #::Vector{Variable} # Type weirdness
-output(n::Apply{Variable}) = n.output::Variable
-
 function name{T <: Node}(n::T, str::AbstractString)
     n.name = Nullable(str)
     n
 end
 
-function Variable(data::VarType, name::AbstractString="")
-    #newName = length(name) == 0 ? Nullable() : Nullable(name)
-    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
-    Variable(Nullable(), [], data, newName)
-end
-
 function apply(op::OpType, inputs::Vector{Variable}, name::AbstractString="")
+    #TODO: Is there a way to combine the var and apply creation? Perhaps an inner constructor?
     newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
     var = Variable(TensorVar())
     apply = Apply{Variable}(op, inputs, var, newName)
@@ -67,39 +81,25 @@ function apply(op::OpType, inputs::Vector{Variable}, name::AbstractString="")
     for i in inputs
         push!(i.clients, apply)
     end
-
     var
 end
 
 ########
 # Variable Types
 ########
-
-
-# type ConstantString <: VarType
-#     value::Any
-# end
-
-# type ConstantReal <: VarType
-#     value::Real
-# end
-
-# type ConstantTensor <: Tensor
-#     value::AbstractArray
-#     shape::Vector{Int}
-# end
-
-# Define constant tensors which aren't written out by
-# ConstantOp(val, [shape])
-# Similar for random
+# TODO: Decide whether everything is a matrix or not - I think they are
+# SUPER TODO: Shape inference
+#### SUPER TODO: Broadcasting (see ?broadcast)
 
 abstract Tensor <: VarType
 
+# Use for constants which we write out explictly.  
+# Define larger constant tensors (e.g. zeros, ones...) by ConstantOp(val, [shape])
+# similar for random.
 type TensorConstant <: Tensor
     value::AbstractArray
     shape::Vector{Int}
 end
-
 
 type Input <: Tensor
     #shape::Vector{Int}
@@ -111,47 +111,52 @@ end
 ########
 # Operations
 ########
-
-
-
+# TODO: Does this type hierarchy make any sense?
 
 # Create
-
 abstract CreateOp <: OpType
 abstract ConstantOp <: CreateOp
+abstract RandomOp <: CreateOp  # TODO: Make these!
 
 type Zeros <: ConstantOp end
 type Ones <: ConstantOp end
 type Fill <: ConstantOp end
 
+type OnesLike <: ConstantOp end
+
 function constant(val::Real, name::AbstractString="")
     Variable(TensorConstant([val], [1,1]), name)
-    #Variable{TensorConstant}([val], [1,1])
 end
 
 function constant(val::AbstractArray, name::AbstractString="")
     Variable(TensorConstant(val, collect(size(val))), name)
 end
 
-function fill(shape::Array{Int}, val)
-    apply(Fill(), [constant(shape), constant(val)])
+function fill(shape::Array{Int}, val, name::AbstractString="")
+    apply(Fill(), [constant(shape), constant(val)], name)
 end
 
-function zeros(shape::Array{Int})
-    fill(shape, 0)
+function zeros(shape::Array{Int}, name::AbstractString="")
+    fill(shape, 0, name)
 end
 
-function ones(shape::Array{Int})
-    fill(shape, 1)
+function ones(shape::Array{Int}, name::AbstractString="")
+    fill(shape, 1, name)
 end
 
+function ones_like(input::Variable, name::AbstractString="")
+    apply(OnesLike(), [input], name)
+end
+
+# Specifies an input variable
 function input(name::AbstractString="")
     Variable(Input(), name)
 end
 
 # Elementwise
+# TODO: Is there a better way than instantiating the op as the first argument?
 abstract ElementWise <: OpType
-# So .+ and + are technically different, but just use + and - for now
+# .+ and + are different, just support + and - for now
 type Add <: ElementWise end
 type Sub <: ElementWise end
 type Mul <: ElementWise end
@@ -166,6 +171,7 @@ type Neg <: UnOp end
 
 type Transpose <: UnOp end
 
+# TODO: Make += -= etc.
 type Assign <: OpType end
 
 
@@ -173,6 +179,13 @@ type Assign <: OpType end
 Neg(a::Variable) = apply(Neg(), [a])
 
 t(a::Variable) = apply(Transpose(), [a])
+
+# TODO: Macro to make it easy to define parts of an operation all together
+# e.g. @createOp Add, add, [a, b], [g, g], a + b, [shape inference]
+#                type, name, args, gradients, implementation, [shape inference]
+# for op = (:+, :-, :*, :/)
+#   @eval ($op)(a::Variable, b::Variable) = opn{Tensor}(BinOp(op), a, b)
+# end
 
 
 .*(a::Variable, b::Variable) = apply(Mul(), [a, b])
@@ -183,7 +196,26 @@ t(a::Variable) = apply(Transpose(), [a])
 
 .=(a::Variable, b::Variable) = apply(Assign(), [a, b])
 
-### Gradients
+######
+# Operations implementations
+######
+
+op(op::Add, a::AbstractArray, b::AbstractArray) = a + b
+op(op::Sub, a::AbstractArray, b::AbstractArray) = a - b
+op(op::Mul, a::AbstractArray, b::AbstractArray) = a .* b
+op(op::Div, a::AbstractArray, b::AbstractArray) = a ./ b
+
+op(op::MatMul, a::AbstractArray, b::AbstractArray) = a * b
+
+op(op::Neg, a::AbstractArray) = -a
+
+op(op::Transpose, a::AbstractArray) = transpose(a)
+op(op::OnesLike, a::AbstractArray) = Base.ones(a)
+
+
+######
+# Gradients
+######
 # Return vector of variables, where ith is result of gradient wrt input i
 function grad(op::Add, inputs::Vector{Variable}, grad_out::Variable)
     [grad_out, grad_out]
@@ -214,20 +246,15 @@ function grad(op::Transpose, inputs::Vector{Variable}, grad_out::Variable)
     [grad_out]
 end
 
-function grad(op::Assign, inputs::Vector{Variable}, grad_out::Variable)
-    [grad_out]
-end
-
 # Autodiff
 function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
     # Set of nodes on all paths between the set `wrt` and `out`
-    # Not
     downstream = influenced_by(wrt, true)
     upstream = influenced_by([out], false)
     on_path = intersect(upstream, downstream)
 
     toposorted = toposort(graph)
-    node_to_grad = Dict{Variable, Variable}(out => (out ./ out))
+    node_to_grad = Dict{Variable, Variable}(out => ones_like(out))
     for node = reverse(toposorted)
         if !(node in on_path)
             continue
@@ -275,25 +302,6 @@ function influenced_by(nodes::Vector{Variable}, child::Bool)
     end
     influenced
 end
-
-######
-# Operations implementations
-######
-
-op(op::Add, a::AbstractArray, b::AbstractArray) = a + b
-op(op::Sub, a::AbstractArray, b::AbstractArray) = a - b
-op(op::Mul, a::AbstractArray, b::AbstractArray) = a .* b
-op(op::Div, a::AbstractArray, b::AbstractArray) = a ./ b
-
-op(op::MatMul, a::AbstractArray, b::AbstractArray) = a * b
-op(op::MatMul, a::Real, b::AbstractArray) = a * b
-op(op::MatMul, a::AbstractArray, b::Real) = a * b
-op(op::MatMul, a::Real, b::Real) = a * b
-
-op(op::Neg, a::AbstractArray) = -a
-
-op(op::Transpose, a::AbstractArray) = transpose(a)
-
 
 ######
 # Interpret
@@ -368,6 +376,7 @@ function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
 end
 
 # This is super hacky
+# SUPER TODO: Fix this
 function numeric_grad(f::Func, x::AbstractArray, eps=0.001)
     (res1, ) = interpret(f, (x - eps,))
     (res2, ) = interpret(f, (x + eps,))
@@ -380,10 +389,6 @@ end
 ######
 # Graph operations
 ######
-
-function dfs(seen::Vector{Node})
-    # WRITE THIS
-end
 
 # Returns nodes in topological order
 function toposort(graph::Graph)
@@ -438,24 +443,9 @@ function getGraph(nodes::Vector{Variable})
     Graph(seen)
 end
 
-pred(node::Apply) = inputs(node)
-succ(node::Apply) = [node.output]
-
-# function pred(node::Apply{T})
-#     node.inputs
-# end
-# function succ(node::Apply{T})
-#     [node.output]
-# end
-
-function pred(node::Variable)
-    isnull(node.owner) ? [] : [get(node.owner)]
-end
-
-
-function succ(node::Variable)
-    node.clients
-end
+##################
+# Representation #
+##################
 
 # Print connected component of node
 function toDot(node::Node)
@@ -508,10 +498,3 @@ function toString{T <: Node}(nodes::Vector{T})
     c = ", "
     "[$(join(map(toString, nodes), c))]"
 end
-
-# for op = (:+, :-, :*, :/)
-#   @eval ($op)(a::Variable, b::Variable) = opn{Tensor}(BinOp(op), a, b)
-# end
-
-
-## Functions CGT implements
