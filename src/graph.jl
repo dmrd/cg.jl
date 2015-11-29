@@ -174,27 +174,62 @@ type Transpose <: UnOp end
 # TODO: Make += -= etc.
 type Assign <: OpType end
 
+########
+# Operation creation macros
+########
 
--(a::Variable) = apply(Neg(), [a])
-Neg(a::Variable) = apply(Neg(), [a])
+# Each operation needs:
+## 1. Type (identifier)
+## 2. functions (call or infix, e.g. add and +)
+## 3. gradients
+## 4. shape inference
+## 5. shape inference
+## Macros:
+### register_ops Type [func, names]
+### register_grad Type [grad_body]  # Use ds as variable - similar to ReverseDiff
+### register_shape Type [shape body]
 
-t(a::Variable) = apply(Transpose(), [a])
+macro register_op(typ, op, nargs)
+    assert(nargs >= 0)
+    args = []
+    apply_args = []
+    # Var names 'a'...'z'
+    for var = 'a':('a' + nargs - 1)
+        varsym = symbol(var)
+        push!(args, :($(varsym)::Variable))
+        push!(apply_args, varsym)
+    end
+    # TODO: Is there a way to interpolate an expr (like splat) into another expr with $ or similar?
+    # For now, use Expr function (for which we can use splat).
+    # Actually think it's pretty clear.
+    Expr(:function,
+         Expr(:call,
+              esc(op),
+              args...),
+         Expr(:call,
+              :apply,
+              Expr(:call, typ),
+              Expr(:vect, apply_args...)))
+end
+
+
+# @register_op(Mul, .*, 2)
+# Expands to
+# function .*(a::Variable, b::Variable) apply(Mul(), [a, b]) end
+@register_op Neg       (-)   1
+@register_op Transpose t     1
+
+@register_op MatMul    (*)   2
+@register_op Mul       (.*)  2
+@register_op Div       (./)  2
+@register_op Add       (+)   2
+@register_op Sub       (-)   2
+@register_op Assign    (.=)  2
+@register_op Sub       (-)   2
 
 # TODO: Macro to make it easy to define parts of an operation all together
 # e.g. @createOp Add, add, [a, b], [g, g], a + b, [shape inference]
 #                type, name, args, gradients, implementation, [shape inference]
-# for op = (:+, :-, :*, :/)
-#   @eval ($op)(a::Variable, b::Variable) = opn{Tensor}(BinOp(op), a, b)
-# end
-
-
-.*(a::Variable, b::Variable) = apply(Mul(), [a, b])
-./(a::Variable, b::Variable) = apply(Div(), [a, b])
-+(a::Variable, b::Variable) = apply(Add(), [a, b])
--(a::Variable, b::Variable) = apply(Sub(), [a, b])
-*(a::Variable, b::Variable) = apply(MatMul(), [a, b])
-
-.=(a::Variable, b::Variable) = apply(Assign(), [a, b])
 
 ######
 # Operations implementations
@@ -376,10 +411,11 @@ function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
 end
 
 # This is super hacky
+# Assumes that first return result is target variable
 # SUPER TODO: Fix this
 function numeric_grad(f::Func, x::AbstractArray, eps=0.001)
-    (res1, ) = interpret(f, (x - eps,))
-    (res2, ) = interpret(f, (x + eps,))
+    res1 = interpret(f, (x - eps,))[1]
+    res2 = interpret(f, (x + eps,))[1]
     return (res2 - res1) / (2eps * length(x))
 end
 
