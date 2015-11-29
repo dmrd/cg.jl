@@ -3,15 +3,16 @@ importall Base.Operators
 
 typealias Float Float32
 
-######
-# Basic types
-#####
+###############
+# Basic types #
+###############
 
 abstract Node
 abstract VarType
 abstract OpType
 
 # TODO: Make this graph container more powerful / actually do something
+## build better graph abstraction, avoid repeated code
 immutable Graph
     nodes::Set{Node}
 end
@@ -25,7 +26,6 @@ type Apply{T <: Node} <: Node
     output::T
     name::Nullable{AbstractString}
 end
-
 
 type Variable <: Node
     owner::Nullable{Apply}
@@ -41,7 +41,7 @@ end
 
 # Accessors
 # TODO: Are accessors considered good style instead of accessing directly?
-# TODO: Remove redundancies
+# TODO: Remove redundancies and reorganize
 inputs(n::Apply{Variable}) = n.inputs::Vector{Variable}
 output(n::Apply{Variable}) = n.output::Variable
 
@@ -84,16 +84,17 @@ function apply(op::OpType, inputs::Vector{Variable}, name::AbstractString="")
     var
 end
 
-########
+####
 # Variable Types
-########
-# TODO: Decide whether everything is a matrix or not - I think they are
+####
+
+# TODO: Decide whether everything is a matrix or not
 # SUPER TODO: Shape inference
 #### SUPER TODO: Broadcasting (see ?broadcast)
 
 abstract Tensor <: VarType
 
-# Use for constants which we write out explictly.  
+# Use for constants which we write out explictly.
 # Define larger constant tensors (e.g. zeros, ones...) by ConstantOp(val, [shape])
 # similar for random.
 type TensorConstant <: Tensor
@@ -108,10 +109,16 @@ end
 type TensorVar <: Tensor
     #shape::Vector{Int}
 end
-########
+
+####
 # Operations
-########
-# TODO: Does this type hierarchy make any sense?
+####
+
+# TODO: Does this type hierarchy make any sense?  Think carefully about what's necessary
+# Also whether it needs a hierarchy at all.  Unclear if we make use of it anywhere
+# Additionally, can these be defined together with other parts of command?
+# Either reorganize or even have these created inside macro
+# (i.e. pass in `Zeros <: ConstantOp` as a parameter - probably unnecessary)
 
 # Create
 abstract CreateOp <: OpType
@@ -144,10 +151,6 @@ function ones(shape::Array{Int}, name::AbstractString="")
     fill(shape, 1, name)
 end
 
-function ones_like(input::Variable, name::AbstractString="")
-    apply(OnesLike(), [input], name)
-end
-
 # Specifies an input variable
 function input(name::AbstractString="")
     Variable(Input(), name)
@@ -174,9 +177,9 @@ type Transpose <: UnOp end
 # TODO: Make += -= etc.
 type Assign <: OpType end
 
-########
-# Operation creation macros
-########
+#############################
+# Operation creation macros #
+#############################
 
 # Each operation needs:
 ## 1. Type (identifier)
@@ -207,9 +210,11 @@ function gen_args(narg, typ::DataType)
     args, apply_args
 end
 
-# @register_op  Mul (.*) 2
-# Expands to
-# function .*(a::Variable, b::Variable) apply(Mul(), [a, b]) end
+"""
+@register_op  Mul (.*) 2
+Expands to
+function .*(a::Variable, b::Variable) apply(Mul(), [a, b]) end
+"""
 macro register_op(typ, op, narg)
     # TODO: Is there a way to interpolate an expr (like splat) into another expr with $ or similar?
     # For now, use Expr function (for which we can use splat).
@@ -225,11 +230,13 @@ macro register_op(typ, op, narg)
               Expr(:vect, apply_args...)))
 end
 
-# @register_grad Mul (a .* ds) (b .* ds)
-# Expands to
-##function grad(op::Mul, ds::Variable, a::Variable, b::Variable)
-##    [a .* ds, b .* grad_out]
-##end
+"""
+@register_grad Mul (a .* ds) (b .* ds)
+ Expands to
+function grad(op::Mul, ds::Variable, a::Variable, b::Variable)
+    [a .* ds, b .* grad_out]
+end
+"""
 macro register_grad(typ, grads...)
     args, _ = gen_args(length(grads), Variable)
     Expr(:function,
@@ -242,11 +249,13 @@ macro register_grad(typ, grads...)
               grads...))
 end
 
-# @register_impl Mul 3 (a + b + c)
-# Expands to
-##function op(op::Mul, a::AbstractArray, b::AbstractArray, c::AbstractArray)
-##    a + b + c
-##end
+"""
+@register_impl Mul 3 (a + b + c)
+Expands to
+function op(op::Mul, a::AbstractArray, b::AbstractArray, c::AbstractArray)
+    a + b + c
+end
+"""
 macro register_impl(typ, narg, impl)
     args, _ = gen_args(narg, AbstractArray)
     Expr(:function,
@@ -257,19 +266,21 @@ macro register_impl(typ, narg, impl)
          impl)
 end
 
-@register_op Neg       (-)   1
-@register_op Transpose t     1
+#########################
+# Operation Definitions #
+#########################
 
-@register_op MatMul    (*)   2
-@register_op Mul       (.*)  2
-@register_op Div       (./)  2
-@register_op Add       (+)   2
-@register_op Sub       (-)   2
-@register_op Assign    (.=)  2
-@register_op Sub       (-)   2
-######
-# Operations implementations
-######
+@register_op OnesLike  ones_like  1
+@register_op Neg       (-)        1
+@register_op Transpose t          1
+
+@register_op MatMul    (*)        2
+@register_op Mul       (.*)       2
+@register_op Div       (./)       2
+@register_op Add       (+)        2
+@register_op Sub       (-)        2
+@register_op Assign    (.=)       2
+@register_op Sub       (-)        2
 
 
 @register_impl Add       2   (a + b)
@@ -282,9 +293,6 @@ end
 @register_impl OnesLike  1   Base.ones(a)
 
 
-######
-# Gradients
-######
 @register_grad Add ds ds
 @register_grad Sub (-ds) (-ds)
 @register_grad Mul (a .* ds) (b .* ds)
@@ -293,7 +301,20 @@ end
 @register_grad Neg -ds
 @register_grad Transpose ds
 
-# Autodiff
+
+########################
+# Gradient computation #
+########################
+
+# This is super hacky
+# Assumes that first return result is target variable
+# SUPER TODO: Fix this.  Doesn't actually work for nonscalars
+function numeric_grad(f::Func, x::AbstractArray, eps=0.001)
+    res1 = interpret(f, (x - eps,))[1]
+    res2 = interpret(f, (x + eps,))[1]
+    return (res2 - res1) / (2eps * length(x))
+end
+
 function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
     # Set of nodes on all paths between the set `wrt` and `out`
     downstream = influenced_by(wrt, true)
@@ -327,7 +348,6 @@ function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
     node_to_grad
 end
 
-## TODO: Build better graph abstraction, avoid repeated code
 
 # Return set of nodes that are influenced in the DAG from any in set `nodes`
 # i.e. that would be influenced by in a computation
@@ -349,9 +369,9 @@ function influenced_by(nodes::Vector{Variable}, child::Bool)
     influenced
 end
 
-######
-# Interpret
-######
+###################
+# Interpret Graph #
+###################
 
 # Super slow interpret functions
 function interpret(f::Func, arguments::Tuple{AbstractArray})
@@ -421,21 +441,12 @@ function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
     result
 end
 
-# This is super hacky
-# Assumes that first return result is target variable
-# SUPER TODO: Fix this
-function numeric_grad(f::Func, x::AbstractArray, eps=0.001)
-    res1 = interpret(f, (x - eps,))[1]
-    res2 = interpret(f, (x + eps,))[1]
-    return (res2 - res1) / (2eps * length(x))
-end
-
 ## TODO: Transform to straight Julia source code
 # Time to learn some metaprogramming!
 
-######
-# Graph operations
-######
+####################
+# Graph operations #
+####################
 
 # Returns nodes in topological order
 function toposort(graph::Graph)
