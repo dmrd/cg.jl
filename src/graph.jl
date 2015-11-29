@@ -41,6 +41,7 @@ end
 
 # Accessors
 # TODO: Are accessors considered good style instead of accessing directly?
+# TODO: Remove redundancies
 inputs(n::Apply{Variable}) = n.inputs::Vector{Variable}
 output(n::Apply{Variable}) = n.output::Variable
 
@@ -50,7 +51,6 @@ succ(n::Apply{Variable}) = [n.output]::Vector{Variable}
 #pred(n::Variable) = (isnull(n.owner) ? []::Vector{Apply} : [get(n.owner)])::Vector{Apply}
 pred(n::Variable) = isnull(n.owner) ? [] : [get(n.owner)]
 succ(n::Variable) = n.clients::Vector{Apply}
-
 
 immutable Func
     graph::Graph
@@ -189,14 +189,19 @@ type Assign <: OpType end
 ### register_grad Type [grad_body]  # Use ds as variable - similar to ReverseDiff
 ### register_shape Type [shape body]
 
-function gen_args(narg)
+
+# TODO: make it easy to define parts of an operation all together?
+# e.g. @createOp Add, add, [a, b], [g, g], a + b, [shape inference]
+#                type, name, args, gradients, implementation, [shape inference]
+
+function gen_args(narg, typ::DataType)
     assert(narg >= 0)
     args = []
     apply_args = []
     # Var names 'a'...'z'
     for var = 'a':('a' + narg - 1)
         varsym = symbol(var)
-        push!(args, :($(varsym)::Variable))
+        push!(args, :($(varsym)::$(typ)))
         push!(apply_args, varsym)
     end
     args, apply_args
@@ -209,7 +214,7 @@ macro register_op(typ, op, narg)
     # TODO: Is there a way to interpolate an expr (like splat) into another expr with $ or similar?
     # For now, use Expr function (for which we can use splat).
     # Actually think it's pretty clear.
-    args, apply_args = gen_args(narg)
+    args, apply_args = gen_args(narg, Variable)
     Expr(:function,
          Expr(:call,
               esc(op),
@@ -226,7 +231,7 @@ end
 ##    [a .* ds, b .* grad_out]
 ##end
 macro register_grad(typ, grads...)
-    args, _ = gen_args(length(grads))
+    args, _ = gen_args(length(grads), Variable)
     Expr(:function,
          Expr(:call,
               esc(:grad),
@@ -235,6 +240,21 @@ macro register_grad(typ, grads...)
               args...),
          Expr(:vect,
               grads...))
+end
+
+# @register_impl Mul 3 (a + b + c)
+# Expands to
+##function op(op::Mul, a::AbstractArray, b::AbstractArray, c::AbstractArray)
+##    a + b + c
+##end
+macro register_impl(typ, narg, impl)
+    args, _ = gen_args(narg, AbstractArray)
+    Expr(:function,
+         Expr(:call,
+              esc(:op),
+              :(op::$typ),
+              args...),
+         impl)
 end
 
 @register_op Neg       (-)   1
@@ -247,26 +267,19 @@ end
 @register_op Sub       (-)   2
 @register_op Assign    (.=)  2
 @register_op Sub       (-)   2
-
-# TODO: Macro to make it easy to define parts of an operation all together
-# e.g. @createOp Add, add, [a, b], [g, g], a + b, [shape inference]
-#                type, name, args, gradients, implementation, [shape inference]
-
 ######
 # Operations implementations
 ######
 
-op(op::Add, a::AbstractArray, b::AbstractArray) = a + b
-op(op::Sub, a::AbstractArray, b::AbstractArray) = a - b
-op(op::Mul, a::AbstractArray, b::AbstractArray) = a .* b
-op(op::Div, a::AbstractArray, b::AbstractArray) = a ./ b
 
-op(op::MatMul, a::AbstractArray, b::AbstractArray) = a * b
-
-op(op::Neg, a::AbstractArray) = -a
-
-op(op::Transpose, a::AbstractArray) = transpose(a)
-op(op::OnesLike, a::AbstractArray) = Base.ones(a)
+@register_impl Add       2   (a + b)
+@register_impl Sub       2   (a - b)
+@register_impl Mul       2   (a .* b)
+@register_impl Div       2   (a ./ b)
+@register_impl MatMul    2   (a * b)
+@register_impl Neg       1   (-a)
+@register_impl Transpose 1   transpose(a)
+@register_impl OnesLike  1   Base.ones(a)
 
 
 ######
