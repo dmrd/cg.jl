@@ -60,11 +60,11 @@ immutable Func
 end
 
 function Func(outputs::Vector{Variable})
-    Func(getGraph(outputs), outputs, Vector{Variable}(), Dict{Variable, AbstractArray}())
+    Func(get_graph(outputs), outputs, Vector{Variable}(), Dict{Variable, AbstractArray}())
 end
 
 function Func(outputs::Vector{Variable}, inputs::Vector{Variable})
-    Func(getGraph(union(outputs, inputs)), outputs, inputs, Dict{Variable, AbstractArray}())
+    Func(get_graph(union(outputs, inputs)), outputs, inputs, Dict{Variable, AbstractArray}())
 end
 
 function name{T <: Node}(n::T, str::AbstractString)
@@ -189,19 +189,27 @@ type Assign <: OpType end
 ### register_grad Type [grad_body]  # Use ds as variable - similar to ReverseDiff
 ### register_shape Type [shape body]
 
-macro register_op(typ, op, nargs)
-    assert(nargs >= 0)
+function gen_args(narg)
+    assert(narg >= 0)
     args = []
     apply_args = []
     # Var names 'a'...'z'
-    for var = 'a':('a' + nargs - 1)
+    for var = 'a':('a' + narg - 1)
         varsym = symbol(var)
         push!(args, :($(varsym)::Variable))
         push!(apply_args, varsym)
     end
+    args, apply_args
+end
+
+# @register_op  Mul (.*) 2
+# Expands to
+# function .*(a::Variable, b::Variable) apply(Mul(), [a, b]) end
+macro register_op(typ, op, narg)
     # TODO: Is there a way to interpolate an expr (like splat) into another expr with $ or similar?
     # For now, use Expr function (for which we can use splat).
     # Actually think it's pretty clear.
+    args, apply_args = gen_args(narg)
     Expr(:function,
          Expr(:call,
               esc(op),
@@ -212,10 +220,23 @@ macro register_op(typ, op, nargs)
               Expr(:vect, apply_args...)))
 end
 
-
-# @register_op(Mul, .*, 2)
+# @register_grad Mul (a .* ds) (b .* ds)
 # Expands to
-# function .*(a::Variable, b::Variable) apply(Mul(), [a, b]) end
+##function grad(op::Mul, ds::Variable, a::Variable, b::Variable)
+##    [a .* ds, b .* grad_out]
+##end
+macro register_grad(typ, grads...)
+    args, _ = gen_args(length(grads))
+    Expr(:function,
+         Expr(:call,
+              esc(:grad),
+              :(op::$typ),
+              :(ds::Variable),
+              args...),
+         Expr(:vect,
+              grads...))
+end
+
 @register_op Neg       (-)   1
 @register_op Transpose t     1
 
@@ -251,35 +272,13 @@ op(op::OnesLike, a::AbstractArray) = Base.ones(a)
 ######
 # Gradients
 ######
-# Return vector of variables, where ith is result of gradient wrt input i
-function grad(op::Add, inputs::Vector{Variable}, grad_out::Variable)
-    [grad_out, grad_out]
-end
-
-function grad(op::Sub, inputs::Vector{Variable}, grad_out::Variable)
-    res = -grad_out
-    [res, res]
-end
-
-function grad(op::Mul, inputs::Vector{Variable}, grad_out::Variable)
-    [inputs[1] .* grad_out, inputs[2] .* grad_out]
-end
-
-function grad(op::Div, inputs::Vector{Variable}, grad_out::Variable)
-    [grad_out ./ inputs[1], grad_out ./ inputs[2]]
-end
-
-function grad(op::MatMul, inputs::Vector{Variable}, grad_out::Variable)
-    [grad_out * t(inputs[2]), t(inputs[1]) * grad_out]
-end
-
-function grad(op::Neg, inputs::Vector{Variable}, grad_out::Variable)
-    [-grad_out]
-end
-
-function grad(op::Transpose, inputs::Vector{Variable}, grad_out::Variable)
-    [grad_out]
-end
+@register_grad Add ds ds
+@register_grad Sub (-ds) (-ds)
+@register_grad Mul (a .* ds) (b .* ds)
+@register_grad Div (ds ./ a) (ds .* b)
+@register_grad MatMul (ds * t(b)) (t(a) * ds)
+@register_grad Neg -ds
+@register_grad Transpose ds
 
 # Autodiff
 function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
@@ -300,7 +299,7 @@ function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
         else
             # Should have already computed output's gradient
             @assert haskey(node_to_grad, node.output)
-            gradients = grad(node.op, inputs(node), node_to_grad[node.output])
+            gradients = grad(node.op, node_to_grad[node.output], inputs(node)...)
             for (original, gradient) in zip(inputs(node), gradients)
                 if original in on_path
                     node_to_grad[original] = gradient
@@ -312,7 +311,6 @@ function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
             end
         end
     end
-    
     node_to_grad
 end
 
@@ -365,7 +363,7 @@ function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
             if isa(node.data, Input)
                 @assert (node in f.inputs) # "Every input node must have a value"
             elseif isnull(node.owner) && !isa(node.data, TensorConstant)
-                print(toString(node))
+                print(tostring(node))
                 @assert false && "Every noninput node must have a parent"
             end
         end
@@ -455,7 +453,7 @@ function toposort(graph::Graph)
 end
 
 # Return graph consisting of all nodes connected to given Variables
-function getGraph(nodes::Vector{Variable})
+function get_graph(nodes::Vector{Variable})
     stack = Vector{Node}(nodes)
     seen = Set{Node}(nodes)
     while !isempty(stack)
@@ -484,8 +482,8 @@ end
 ##################
 
 # Print connected component of node
-function toDot(node::Node)
-    G = getGraph([node])
+function to_dot(node::Node)
+    G = get_graph([node])
     nodeIds = Dict{Node, Int}()
     id = 0
     for node in G.nodes
@@ -498,7 +496,7 @@ function toDot(node::Node)
     for node in G.nodes
         thisId = nodeIds[node]
         shape = isa(node, Apply) ? "box" : "ellipse"
-        labelLine = string(thisId, " [shape=\"", shape,"\", label=\"", toString(node), "\"];")
+        labelLine = string(thisId, " [shape=\"", shape,"\", label=\"", tostring(node), "\"];")
         push!(labels, labelLine)
         for next in succ(node)
             edge = "$(nodeIds[node]) -> $(nodeIds[next]);"
@@ -514,7 +512,7 @@ function toDot(node::Node)
            )
 end
 
-function toString(node::Variable)
+function tostring(node::Variable)
     if !(isnull(node.name))
         return "$(get(node.name)): $(typeof(node.data))"
     else
@@ -522,7 +520,7 @@ function toString(node::Variable)
     end
 end
 
-function toString(node::Apply)
+function tostring(node::Apply)
     if !(isnull(node.name))
         return "$(get(node.name)): $(typeof(node.op))"
     else
@@ -530,7 +528,7 @@ function toString(node::Apply)
     end
 end
 
-function toString{T <: Node}(nodes::Vector{T})
+function tostring{T <: Node}(nodes::Vector{T})
     c = ", "
-    "[$(join(map(toString, nodes), c))]"
+    "[$(join(map(tostring, nodes), c))]"
 end
