@@ -110,10 +110,24 @@ type TensorVar <: Tensor
     #shape::Vector{Int}
 end
 
+function constant(val::Real, name::AbstractString="")
+    Variable(TensorConstant([val], [1,1]), name)
+end
+
+function constant(val::AbstractArray, name::AbstractString="")
+    Variable(TensorConstant(val, collect(size(val))), name)
+end
+
+# Specifies an input variable
+function input(name::AbstractString="")
+    Variable(Input(), name)
+end
+
 ####
 # Operations
 ####
 
+# TODO: Is there a better way than instantiating the op as the first argument?
 # TODO: Does this type hierarchy make any sense?  Think carefully about what's necessary
 # Also whether it needs a hierarchy at all.  Unclear if we make use of it anywhere
 # Additionally, can these be defined together with other parts of command?
@@ -124,58 +138,23 @@ end
 abstract CreateOp <: OpType
 abstract ConstantOp <: CreateOp
 abstract RandomOp <: CreateOp  # TODO: Make these!
+abstract ElementWise <: OpType
 
+type Fill <: ConstantOp end
 type Zeros <: ConstantOp end
 type Ones <: ConstantOp end
-type Fill <: ConstantOp end
-
 type OnesLike <: ConstantOp end
 
-function constant(val::Real, name::AbstractString="")
-    Variable(TensorConstant([val], [1,1]), name)
-end
-
-function constant(val::AbstractArray, name::AbstractString="")
-    Variable(TensorConstant(val, collect(size(val))), name)
-end
-
-function fill(shape::Array{Int}, val, name::AbstractString="")
-    apply(Fill(), [constant(shape), constant(val)], name)
-end
-
-function zeros(shape::Array{Int}, name::AbstractString="")
-    fill(shape, 0, name)
-end
-
-function ones(shape::Array{Int}, name::AbstractString="")
-    fill(shape, 1, name)
-end
-
-# Specifies an input variable
-function input(name::AbstractString="")
-    Variable(Input(), name)
-end
-
-# Elementwise
-# TODO: Is there a better way than instantiating the op as the first argument?
-abstract ElementWise <: OpType
 # .+ and + are different, just support + and - for now
 type Add <: ElementWise end
 type Sub <: ElementWise end
 type Mul <: ElementWise end
 type Div <: ElementWise end
+type Neg <: ElementWise end
 
-# Matrix math
-type MatMul <: OpType end
-
-# Unary operations
-abstract UnOp <: OpType
-type Neg <: UnOp end
-
-type Transpose <: UnOp end
-
-# TODO: Make += -= etc.
-type Assign <: OpType end
+type MatMul <: OpType end  # Matrix multiply
+type Transpose <: OpType end
+type Assign <: OpType end # TODO: Make += -= etc.
 
 #############################
 # Operation creation macros #
@@ -269,36 +248,49 @@ end
 #########################
 # Operation Definitions #
 #########################
+# TODO: Define all parts of an operation together or keep similar parts grouped?
 
-@register_op OnesLike  ones_like  1
-@register_op Neg       (-)        1
-@register_op Transpose t          1
+# Wrapper on fill
+#fill(val, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
 
-@register_op MatMul    (*)        2
-@register_op Mul       (.*)       2
-@register_op Div       (./)       2
-@register_op Add       (+)        2
-@register_op Sub       (-)        2
-@register_op Assign    (.=)       2
-@register_op Sub       (-)        2
+@register_op Fill        fill         2
+@register_op Zeros       zeros        1
+@register_op Ones        ones         1
+@register_op OnesLike    ones_like    1
 
+@register_op Add         (+)          2
+@register_op Sub         (-)          2
+@register_op Mul         (.*)         2
+@register_op Div         (./)         2
+@register_op Neg         (-)          1
+@register_op MatMul      (*)          2
+@register_op Transpose   t            1
+@register_op Assign      (.=)         2
 
-@register_impl Add       2   (a + b)
-@register_impl Sub       2   (a - b)
-@register_impl Mul       2   (a .* b)
-@register_impl Div       2   (a ./ b)
-@register_impl MatMul    2   (a * b)
-@register_impl Neg       1   (-a)
-@register_impl Transpose 1   transpose(a)
-@register_impl OnesLike  1   Base.ones(a)
+####
 
+@register_impl Fill         2   fill(a[0], b)
+@register_impl Zeros        1   zeros(Float, 1)
+@register_impl Ones         1   ones(Float, 1)
+@register_impl OnesLike     1   Base.ones(a)
+
+@register_impl Add          2   (a + b)
+@register_impl Sub          2   (a - b)
+@register_impl Mul          2   (a .* b)
+@register_impl Div          2   (a ./ b)
+@register_impl Neg          1   (-a)
+@register_impl MatMul       2   (a * b)
+@register_impl Transpose    1   transpose(a)
+#@register_impl Assign       0   transpose(a)  # Special case this in code gen
+
+####
 
 @register_grad Add ds ds
 @register_grad Sub (-ds) (-ds)
 @register_grad Mul (a .* ds) (b .* ds)
 @register_grad Div (ds ./ a) (ds .* b)
-@register_grad MatMul (ds * t(b)) (t(a) * ds)
 @register_grad Neg -ds
+@register_grad MatMul (ds * t(b)) (t(a) * ds)
 @register_grad Transpose ds
 
 
