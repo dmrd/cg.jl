@@ -1,3 +1,4 @@
+# NEXT UP: Few more basic op types, implement update in interpret, basic neural network!
 using Base
 importall Base.Operators
 
@@ -139,6 +140,7 @@ abstract CreateOp <: OpType
 abstract ConstantOp <: CreateOp
 abstract RandomOp <: CreateOp  # TODO: Make these!
 abstract ElementWise <: OpType
+abstract Activations <: ElementWise
 
 type Fill <: ConstantOp end
 type Zeros <: ConstantOp end
@@ -152,9 +154,16 @@ type Mul <: ElementWise end
 type Div <: ElementWise end
 type Neg <: ElementWise end
 
+type Sigmoid <: Activations end
+type Relu <: Activations end
+
+type SoftMax <: OpType end
+
 type MatMul <: OpType end  # Matrix multiply
 type Transpose <: OpType end
 type Assign <: OpType end # TODO: Make += -= etc.
+
+
 
 #############################
 # Operation creation macros #
@@ -267,6 +276,11 @@ end
 @register_op Transpose   t            1
 @register_op Assign      (.=)         2
 
+@register_op Sigmoid     sigmoid      1
+@register_op Relu        relu         1
+
+@register_op SoftMax     softmax      1
+
 ####
 
 @register_impl Fill         2   fill(a[0], b)
@@ -283,6 +297,10 @@ end
 @register_impl Transpose    1   transpose(a)
 #@register_impl Assign       0   transpose(a)  # Special case this in code gen
 
+# Could do in terms of basic ops
+@register_impl Sigmoid      1    (1 / (1 + exp(-x))) 
+@register_impl Relu         1    max(0, a)
+
 ####
 
 @register_grad Add ds ds
@@ -292,6 +310,8 @@ end
 @register_grad Neg -ds
 @register_grad MatMul (ds * t(b)) (t(a) * ds)
 @register_grad Transpose ds
+@register_grad Sigmoid (sigmoid(a) * (1 - sigmoid(a)) * ds)
+@register_grad Relu ((a .> zero(a[1])) .* ds)
 
 
 ########################
