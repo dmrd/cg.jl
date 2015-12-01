@@ -1,5 +1,5 @@
 module cg
 
-# package code goes here
+include("graph.jl")
 
 end # module

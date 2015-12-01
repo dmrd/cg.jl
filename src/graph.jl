@@ -1,6 +1,8 @@
 # NEXT UP: Few more basic op types, implement update in interpret, basic neural network!
+# TODO: Figure out how to cleanly support scalars alongside 1x1 arrays
 using Base
 importall Base.Operators
+importall Base
 
 typealias Float Float32
 
@@ -76,7 +78,7 @@ end
 function apply(op::OpType, inputs::Vector{Variable}, name::AbstractString="")
     #TODO: Is there a way to combine the var and apply creation? Perhaps an inner constructor?
     newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
-    var = Variable(TensorVar())
+    var = Variable(TensorVal())
     apply = Apply{Variable}(op, inputs, var, newName)
     var.owner = apply
     for i in inputs
@@ -103,12 +105,40 @@ type TensorConstant <: Tensor
     shape::Vector{Int}
 end
 
+# Values provided as input
 type Input <: Tensor
     #shape::Vector{Int}
 end
 
-type TensorVar <: Tensor
+# Values produced by Apply
+type TensorVal <: Tensor
     #shape::Vector{Int}
+end
+
+## Variable initialization
+
+abstract InitMethod
+
+type ConstantInit <: InitMethod
+    value::Real
+end
+
+function init(method::ConstantInit, shape::Vector{Int})
+    zeros(Float, tuple(shape))
+end
+
+# Values which are initialized and potentially updated
+type TensorVar <: Tensor
+    shape::Vector{Int}
+    init::InitMethod
+end
+
+function init(var::TensorVar)
+    init(var.init, node.data.shape)
+end
+
+function variable(shape::Vector{Int}, method::InitMethod)
+    TensorVar(shape, method)
 end
 
 function constant(val::Real, name::AbstractString="")
@@ -142,6 +172,7 @@ abstract RandomOp <: CreateOp  # TODO: Make these!
 abstract ElementWise <: OpType
 abstract Activations <: ElementWise
 
+
 type Fill <: ConstantOp end
 type Zeros <: ConstantOp end
 type Ones <: ConstantOp end
@@ -161,7 +192,10 @@ type SoftMax <: OpType end
 
 type MatMul <: OpType end  # Matrix multiply
 type Transpose <: OpType end
-type Assign <: OpType end # TODO: Make += -= etc.
+type Sum <: OpType end
+type Dim <: OpType end
+type Assign <: OpType end
+type InPlaceAdd <: OpType end
 
 
 
@@ -266,6 +300,7 @@ end
 @register_op Zeros       zeros        1
 @register_op Ones        ones         1
 @register_op OnesLike    ones_like    1
+@register_op Dim         dim          1
 
 @register_op Add         (+)          2
 @register_op Sub         (-)          2
@@ -275,6 +310,8 @@ end
 @register_op MatMul      (*)          2
 @register_op Transpose   t            1
 @register_op Assign      (.=)         2
+@register_op Sum         sum          1
+@register_op InPlaceAdd  plusequals   2  # += doesn't work
 
 @register_op Sigmoid     sigmoid      1
 @register_op Relu        relu         1
@@ -283,10 +320,11 @@ end
 
 ####
 
-@register_impl Fill         2   fill(a[0], b)
-@register_impl Zeros        1   zeros(Float, 1)
-@register_impl Ones         1   ones(Float, 1)
+@register_impl Fill         2   Base.fill(a[1], round(Int64, a)...)
+@register_impl Zeros        1   zeros(Float, Round(Int64, a)...)
+@register_impl Ones         1   ones(Float, Round(Int64, a)...)
 @register_impl OnesLike     1   Base.ones(a)
+@register_impl Dim          1   collect(Int, size(a))
 
 @register_impl Add          2   (a + b)
 @register_impl Sub          2   (a - b)
@@ -295,7 +333,8 @@ end
 @register_impl Neg          1   (-a)
 @register_impl MatMul       2   (a * b)
 @register_impl Transpose    1   transpose(a)
-#@register_impl Assign       0   transpose(a)  # Special case this in code gen
+@register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end)
+@register_impl Sum          1   [Base.sum(a)]  # I seriously need to handle reals
 
 # Could do in terms of basic ops
 @register_impl Sigmoid      1    (1 / (1 + exp(-x))) 
@@ -312,6 +351,7 @@ end
 @register_grad Transpose ds
 @register_grad Sigmoid (sigmoid(a) * (1 - sigmoid(a)) * ds)
 @register_grad Relu ((a .> zero(a[1])) .* ds)
+@register_grad Sum fill(ds, dim(a))
 
 
 ########################
@@ -322,9 +362,18 @@ end
 # Assumes that first return result is target variable
 # SUPER TODO: Fix this.  Doesn't actually work for nonscalars
 function numeric_grad(f::Func, x::AbstractArray, eps=0.001)
-    res1 = interpret(f, (x - eps,))[1]
-    res2 = interpret(f, (x + eps,))[1]
-    return (res2 - res1) / (2eps * length(x))
+    arg = float(x)
+    result = zeros(arg)
+    for i in 1:length(arg)
+        arg[i] += eps
+        res1 = interpret(f, (arg,))[1]
+        arg[i] -= 2eps
+        res2 = interpret(f, (arg,))[1]
+        arg[i] += eps
+        #@assert length(res1) == 1
+        result[i] = (res1[1] - res2[1]) / 2eps
+    end
+    result
 end
 
 function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
@@ -386,8 +435,12 @@ end
 ###################
 
 # Super slow interpret functions
+function interpret(f::Func);
+    interpret(f, Dict{Variable,AbstractArray}())
+end
+
 function interpret(f::Func, arguments::Tuple{AbstractArray})
-    @assert length(f.inputs) == length(arguments)
+    #@assert length(f.inputs) == length(arguments)
     args = Dict{Variable, AbstractArray}()
     for (input, arg) = zip(f.inputs, arguments)
         args[input] = arg
@@ -396,36 +449,27 @@ function interpret(f::Func, arguments::Tuple{AbstractArray})
 end
 
 function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
-    @assert length(f.inputs) == length(union(keys(arguments), keys(f.defaults)))
-    for input_node = f.inputs
-        @assert isa(input_node.data, Input)
-    end
-    frontier = Vector{Apply{Variable}}()
-    values = Dict{Variable, AbstractArray{Float}}()
-
-    for node = f.graph.nodes
-        if isa(node, Variable)
-            if isa(node.data, Input)
-                @assert (node in f.inputs) # "Every input node must have a value"
-            elseif isnull(node.owner) && !isa(node.data, TensorConstant)
-                print(tostring(node))
-                @assert false && "Every noninput node must have a parent"
-            end
-        end
-    end
-
-    # Set inputs
-    for node = f.inputs
-        values[node] = arguments[node]
-    end
+    # Is something like T <: Real possible for AbstractArray in arguments?
+    values = merge(f.defaults, arguments)
 
     order = toposort(f.graph)
     for node = order
         if isa(node, Variable)
-            if isa(node.data, TensorConstant)
-                values[node] = node.data.value
+            if !(node in keys(values))
+                if isa(node.data, Input)
+                    @assert false && "Every input node must have a value"
+                elseif isa(node.data, TensorVar)
+                    # Initialize if not explicitly given
+                    values[node] = init(node.data)
+                elseif isa(node.data, TensorConstant)
+                    values[node] = node.data.value
+                elseif isa(node.data, TensorVal)
+                    #print(tostring(node))
+                    @assert false && "Every TensorVal node must have a parent"
+                else
+                    @assert false && "Unknown Variable type"
+                end
             end
-            @assert haskey(values, node)
         elseif isa(node, Apply)
             args = []
             for arg = inputs(node)
