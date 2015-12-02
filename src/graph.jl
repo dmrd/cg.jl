@@ -206,13 +206,9 @@ type InPlaceAdd <: OpType end
 # Each operation needs:
 ## 1. Type (identifier)
 ## 2. functions (call or infix, e.g. add and +)
+## 4. Implementation (CPU/GPU)
 ## 3. gradients
 ## 4. shape inference
-## 5. shape inference
-## Macros:
-### register_ops Type [func, names]
-### register_grad Type [grad_body]  # Use ds as variable - similar to ReverseDiff
-### register_shape Type [shape body]
 
 
 # TODO: make it easy to define parts of an operation all together?
@@ -292,6 +288,12 @@ end
 # Operation Definitions #
 #########################
 # TODO: Define all parts of an operation together or keep similar parts grouped?
+# Todo ops:
+    # boolean operators
+    # get/setindex
+    # random
+    # max/min
+    # common pointwise math (e.g. exp)
 
 # Wrapper on fill
 #fill(val, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
@@ -314,9 +316,9 @@ end
 @register_op InPlaceAdd  plusequals   2  # += doesn't work
 
 @register_op Sigmoid     sigmoid      1
-@register_op Relu        relu         1
+#@register_op Relu        relu         1
 
-@register_op SoftMax     softmax      1
+#@register_op SoftMax     softmax      1
 
 ####
 
@@ -337,20 +339,20 @@ end
 @register_impl Sum          1   [Base.sum(a)]  # I seriously need to handle reals
 
 # Could do in terms of basic ops
-@register_impl Sigmoid      1    (1 / (1 + exp(-x))) 
-@register_impl Relu         1    max(0, a)
+@register_impl Sigmoid      1    (1.0 ./ (1.0 + exp(-a))) 
+#@register_impl Relu         1    max(0, a)
 
 ####
 
 @register_grad Add ds ds
-@register_grad Sub (-ds) (-ds)
-@register_grad Mul (a .* ds) (b .* ds)
-@register_grad Div (ds ./ a) (ds .* b)
+@register_grad Sub (ds) (-ds)
+@register_grad Mul (b .* ds) (a .* ds)
+@register_grad Div (ds ./ b) (ds .* a)
 @register_grad Neg -ds
 @register_grad MatMul (ds * t(b)) (t(a) * ds)
 @register_grad Transpose ds
-@register_grad Sigmoid (sigmoid(a) * (1 - sigmoid(a)) * ds)
-@register_grad Relu ((a .> zero(a[1])) .* ds)
+@register_grad Sigmoid (sigmoid(a) .* (ones_like(a) - sigmoid(a)) .* ds)
+#@register_grad Relu ((a .> zero(a[1])) .* ds)
 @register_grad Sum fill(ds, dim(a))
 
 
@@ -365,9 +367,9 @@ function numeric_grad(f::Func, wrt::Variable, value::AbstractArray, eps=0.001)
     arg = Dict{Variable, AbstractArray}(wrt => argValue)
     for i in 1:length(argValue)
         argValue[i] += eps
-        res1 = interpret(f, arg)[1]
+        res1 = interpretRetArgs(f, arg)[1]
         argValue[i] -= 2eps
-        res2 = interpret(f, arg)[1]
+        res2 = interpretRetArgs(f, arg)[1]
         argValue[i] += eps
         @assert length(res1) == 1
         result[i] = (res1[1] - res2[1]) / 2eps
@@ -434,10 +436,6 @@ end
 ###################
 
 # Super slow interpret functions
-function interpret(f::Func);
-    interpret(f, Dict{Variable,AbstractArray}())
-end
-
 function interpret(f::Func, arguments::Tuple{AbstractArray})
     #@assert length(f.inputs) == length(arguments)
     args = Dict{Variable, AbstractArray}()
@@ -447,15 +445,30 @@ function interpret(f::Func, arguments::Tuple{AbstractArray})
     interpret(f, args)
 end
 
-function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
+# Return back list of output arguments in order
+function interpretRetArgs(f::Func, state::Dict{Variable, AbstractArray})
+    state = interpret(f, state)
+    result = []
+    for arg = f.outputs
+        @assert haskey(state, arg)
+        push!(result, get(state, arg, :impossible))
+    end
+    result
+end
+
+# Takes dictionary mapping each already set variable to a state
+# Will not overwrite constants/variables which are already present
+# Return back dictionary representing current state
+function interpret(f::Func, values::Dict{Variable, AbstractArray}=Dict{Variable,AbstractArray}())
     # Is something like T <: Real possible for AbstractArray in arguments?
-    values = merge(f.defaults, arguments)
 
     order = toposort(f.graph)
     for node = order
         if isa(node, Variable)
             if !(node in keys(values))
-                if isa(node.data, Input)
+                if node in keys(f.defaults)
+                    values[node] = f.defaults[node]
+                elseif isa(node.data, Input)
                     @assert false && "Every input node must have a value"
                 elseif isa(node.data, TensorVar)
                     # Initialize if not explicitly given
@@ -488,12 +501,7 @@ function interpret(f::Func, arguments::Dict{Variable, AbstractArray})
             values[node.output] = out
         end
     end
-    result = []
-    for arg = f.outputs
-        @assert haskey(values, arg)
-        push!(result, get(values, arg, :impossible))
-    end
-    result
+    return values
 end
 
 ## TODO: Transform to straight Julia source code
@@ -610,4 +618,9 @@ end
 function tostring{T <: Node}(nodes::Vector{T})
     c = ", "
     "[$(join(map(tostring, nodes), c))]"
+end
+
+# Pretty print a computation
+function pprint(g::Graph)
+
 end
