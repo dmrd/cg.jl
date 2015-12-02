@@ -59,7 +59,7 @@ immutable Func
     graph::Graph
     outputs::Vector{Variable}
     inputs::Vector{Variable}
-    defaults::Dict{Variable, Any}
+    defaults::Dict{Variable, AbstractArray}
 end
 
 function Func(outputs::Vector{Variable})
@@ -320,7 +320,7 @@ end
 
 ####
 
-@register_impl Fill         2   Base.fill(a[1], round(Int64, a)...)
+@register_impl Fill         2   Base.fill(a[1], round(Int64, b)...)
 @register_impl Zeros        1   zeros(Float, Round(Int64, a)...)
 @register_impl Ones         1   ones(Float, Round(Int64, a)...)
 @register_impl OnesLike     1   Base.ones(a)
@@ -358,19 +358,18 @@ end
 # Gradient computation #
 ########################
 
-# This is super hacky
-# Assumes that first return result is target variable
-# SUPER TODO: Fix this.  Doesn't actually work for nonscalars
-function numeric_grad(f::Func, x::AbstractArray, eps=0.001)
-    arg = float(x)
-    result = zeros(arg)
-    for i in 1:length(arg)
-        arg[i] += eps
-        res1 = interpret(f, (arg,))[1]
-        arg[i] -= 2eps
-        res2 = interpret(f, (arg,))[1]
-        arg[i] += eps
-        #@assert length(res1) == 1
+# Numeric gradient of output with respect to `wrt`
+function numeric_grad(f::Func, wrt::Variable, value::AbstractArray, eps=0.001)
+    argValue = float(value)
+    result = zeros(value)
+    arg = Dict{Variable, AbstractArray}(wrt => argValue)
+    for i in 1:length(argValue)
+        argValue[i] += eps
+        res1 = interpret(f, arg)[1]
+        argValue[i] -= 2eps
+        res2 = interpret(f, arg)[1]
+        argValue[i] += eps
+        @assert length(res1) == 1
         result[i] = (res1[1] - res2[1]) / 2eps
     end
     result
