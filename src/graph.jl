@@ -1,4 +1,6 @@
-# NEXT UP: Few more basic op types, implement update in interpret, basic neural network!
+# NEXT UP: Linear regression
+# Few more basic op types, implement update in interpret, basic neural network!
+# Reorganize, make more general, cleanup
 # TODO: Figure out how to cleanly support scalars alongside 1x1 arrays
 using Base
 importall Base.Operators
@@ -37,9 +39,11 @@ type Variable <: Node
     name::Nullable{AbstractString}
 end
 
-function Variable(data::VarType, name::AbstractString="")
-    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
-    Variable(Nullable(), [], data, newName)
+immutable Func
+    graph::Graph
+    outputs::Vector{Variable}
+    inputs::Vector{Variable}
+    defaults::Dict{Variable, AbstractArray}
 end
 
 # Accessors
@@ -51,15 +55,12 @@ output(n::Apply{Variable}) = n.output::Variable
 pred(n::Apply{Variable}) = n.inputs::Vector{Variable}
 succ(n::Apply{Variable}) = [n.output]::Vector{Variable}
 
-#pred(n::Variable) = (isnull(n.owner) ? []::Vector{Apply} : [get(n.owner)])::Vector{Apply}
 pred(n::Variable) = isnull(n.owner) ? [] : [get(n.owner)]
 succ(n::Variable) = n.clients::Vector{Apply}
 
-immutable Func
-    graph::Graph
-    outputs::Vector{Variable}
-    inputs::Vector{Variable}
-    defaults::Dict{Variable, AbstractArray}
+function Variable(data::VarType, name::AbstractString="")
+    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
+    Variable(Nullable(), [], data, newName)
 end
 
 function Func(outputs::Vector{Variable})
@@ -124,7 +125,7 @@ type ConstantInit <: InitMethod
 end
 
 function init(method::ConstantInit, shape::Vector{Int})
-    zeros(Float, tuple(shape))
+    zeros(Float, tuple(shape...))
 end
 
 # Values which are initialized and potentially updated
@@ -134,11 +135,11 @@ type TensorVar <: Tensor
 end
 
 function init(var::TensorVar)
-    init(var.init, node.data.shape)
+    init(var.init, var.shape)
 end
 
-function variable(shape::Vector{Int}, method::InitMethod)
-    TensorVar(shape, method)
+function variable(shape::Vector{Int}, method::InitMethod, name::AbstractString="")
+    Variable(TensorVar(shape, method), name)
 end
 
 function constant(val::Real, name::AbstractString="")
@@ -328,12 +329,12 @@ end
 @register_impl OnesLike     1   Base.ones(a)
 @register_impl Dim          1   collect(Int, size(a))
 
-@register_impl Add          2   (a + b)
-@register_impl Sub          2   (a - b)
-@register_impl Mul          2   (a .* b)
-@register_impl Div          2   (a ./ b)
+@register_impl Add          2   a .+ b
+@register_impl Sub          2   a .- b
+@register_impl Mul          2   a .* b
+@register_impl Div          2   a ./ b
 @register_impl Neg          1   (-a)
-@register_impl MatMul       2   (a * b)
+@register_impl MatMul       2   a * b
 @register_impl Transpose    1   transpose(a)
 @register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end)
 @register_impl Sum          1   [Base.sum(a)]  # I seriously need to handle reals
@@ -407,6 +408,10 @@ function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
             end
         end
     end
+    # Make sure they are all a part of it - TODO make this have less overhead
+    for node = get_connected(graph.nodes)
+        push!(graph.nodes, node)
+    end
     node_to_grad
 end
 
@@ -456,6 +461,20 @@ function interpretRetArgs(f::Func, state::Dict{Variable, AbstractArray})
     result
 end
 
+function initialize_function(f::Func)
+    values = Dict{Variable,AbstractArray}()
+    for node = f.graph.nodes
+        if isa(node, Variable)
+            if isa(node.data, TensorVar)
+                values[node] = init(node.data)
+            elseif isa(node.data, TensorConstant)
+                values[node] = node.data.value
+            end
+        end
+    end
+    return values
+end
+
 # Takes dictionary mapping each already set variable to a state
 # Will not overwrite constants/variables which are already present
 # Return back dictionary representing current state
@@ -472,9 +491,11 @@ function interpret(f::Func, values::Dict{Variable, AbstractArray}=Dict{Variable,
                     @assert false && "Every input node must have a value"
                 elseif isa(node.data, TensorVar)
                     # Initialize if not explicitly given
-                    values[node] = init(node.data)
+                    #values[node] = init(node.data)
+                    @assert false && "Call initialize_function first"
                 elseif isa(node.data, TensorConstant)
-                    values[node] = node.data.value
+                    #values[node] = node.data.value
+                    @assert false && "Call initialize_function first"
                 elseif isa(node.data, TensorVal)
                     #print(tostring(node))
                     @assert false && "Every TensorVal node must have a parent"
@@ -506,6 +527,32 @@ end
 
 ## TODO: Transform to straight Julia source code
 # Time to learn some metaprogramming!
+################
+# Optimization #
+################
+
+function optimizeWrt(f, input::Variable, data::Array, loss::Variable, parameters::Vector{Variable}, max_steps::Int)
+    gradients = grad(f.graph, loss, parameters)
+
+    state = initialize_function(f)
+    state[input] = data
+    for steps = 1:max_steps
+        interpret(f, state)
+
+        for param = parameters
+            cur = state[param]
+            update = state[gradients[param]]
+            @show cur
+            @show update
+            @assert length(cur) == length(update)
+            for i = 1:length(cur)
+                cur[i] -= update[i]
+            end
+        end
+    end
+    #return map(x -> get(state, x, :ERROR), parameters)
+    return state
+end
 
 ####################
 # Graph operations #
@@ -540,8 +587,8 @@ function toposort(graph::Graph)
 end
 
 # Return graph consisting of all nodes connected to given Variables
-function get_graph(nodes::Vector{Variable})
-    stack = Vector{Node}(nodes)
+function get_connected{T <: Node}(nodes::Set{T})
+    stack = collect(Node, nodes)
     seen = Set{Node}(nodes)
     while !isempty(stack)
         cur = pop!(stack)
@@ -561,7 +608,11 @@ function get_graph(nodes::Vector{Variable})
             end
         end
     end
-    Graph(seen)
+    seen
+end
+
+function get_graph(nodes::Vector{Variable})
+    Graph(get_connected(Set(nodes)))
 end
 
 ##################
