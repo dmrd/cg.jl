@@ -36,3 +36,15 @@ i = cg.input
 @show testGradients(cg.t(i()) * i())
 @show testGradients(sum(cg.sigmoid(i())))
 #@show testGradients(sum(cg.relu(i())))
+
+
+# Test basic optimization
+a = cg.input()
+b = cg.variable([10], cg.ConstantInit(0)) # Parameter
+c = b - a
+d = c .* c
+e = sum(d)
+F = cg.Func([e], [a])
+example = rand(10)
+O = cg.optimizeWrt(F, a, example, e, [b], 2)
+@test_approx_eq example O[b]
