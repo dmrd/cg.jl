@@ -1,5 +1,4 @@
-# NEXT UP: Linear regression
-# Few more basic op types, implement update in interpret, basic neural network!
+# Few more basic op types, basic neural network!
 # Reorganize, make more general, cleanup
 # TODO: Figure out how to cleanly support scalars alongside 1x1 arrays
 using Base
@@ -557,6 +556,21 @@ end
 ####################
 # Graph operations #
 ####################
+
+
+# Node hashing for use in deduping computation graphs
+function hashNode(node::Variable)
+    # TODO: Cleaner chaining?
+    if isnull(node.owner)
+        return hash(node.data)
+    else
+        hash(node.owner, hash(data))
+    end
+end
+
+function hashNode(node::Apply)
+    hash(node.op, hash(inputs))
+end
 
 # Returns nodes in topological order
 function toposort(graph::Graph)
