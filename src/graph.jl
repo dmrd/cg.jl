@@ -634,8 +634,7 @@ end
 ##################
 
 # Print connected component of node
-function to_dot(node::Node)
-    G = get_graph([node])
+function to_dot(G::Graph)
     nodeIds = Dict{Node, Int}()
     id = 0
     for node in G.nodes
@@ -662,6 +661,12 @@ function to_dot(node::Node)
            join(edges,"\n"),
            "\n}"
            )
+end
+
+function render(G::Graph, outfile::AbstractString)
+    dotstr = to_dot(G)
+    dotcmd = `dot -Tpng -o $(outfile)`
+    run(pipeline(`echo $(dotstr)`, dotcmd))
 end
 
 function tostring(node::Variable)
