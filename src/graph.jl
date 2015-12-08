@@ -21,53 +21,60 @@ immutable Graph
     nodes::Set{Node}
 end
 
+immutable Shape
+    shape::Vector{Int}  # length >= 0
+end
+
 # The lack of mutually recursive types is annoying
-# Use T <: Node and Apply{Variable} instead
+# Use T <: Node and Operation{Tensor} instead
 # TODO: Is there a better way to do this?
-type Apply{T <: Node} <: Node
+type Operation{T <: Node} <: Node
     op::OpType
     inputs::Vector{T}
     output::T
     name::Nullable{AbstractString}
 end
 
-type Variable <: Node
-    owner::Nullable{Apply}
-    clients::Vector{Apply}
+type Tensor <: Node
+    owner::Nullable{Operation}
+    clients::Vector{Operation}
     data::VarType
     name::Nullable{AbstractString}
+    flags::Vector{Tuple{Symbol, Symbol}}
+    # Type?  All float for now
 end
 
 immutable Func
     graph::Graph
-    outputs::Vector{Variable}
-    inputs::Vector{Variable}
-    defaults::Dict{Variable, AbstractArray}
+    outputs::Vector{Tensor}
+    inputs::Vector{Tensor}
+    defaults::Dict{Tensor, AbstractArray}
 end
 
 # Accessors
 # TODO: Are accessors considered good style instead of accessing directly?
 # TODO: Remove redundancies and reorganize
-inputs(n::Apply{Variable}) = n.inputs::Vector{Variable}
-output(n::Apply{Variable}) = n.output::Variable
+inputs(n::Operation{Tensor}) = n.inputs::Vector{Tensor}
+output(n::Operation{Tensor}) = n.output::Tensor
 
-pred(n::Apply{Variable}) = n.inputs::Vector{Variable}
-succ(n::Apply{Variable}) = [n.output]::Vector{Variable}
+pred(n::Operation{Tensor}) = n.inputs::Vector{Tensor}
+succ(n::Operation{Tensor}) = [n.output]::Vector{Tensor}
 
-pred(n::Variable) = isnull(n.owner) ? [] : [get(n.owner)]
-succ(n::Variable) = n.clients::Vector{Apply}
+pred(n::Tensor) = isnull(n.owner) ? [] : [get(n.owner)]
+succ(n::Tensor) = n.clients::Vector{Operation}
 
-function Variable(data::VarType, name::AbstractString="")
+# TODO: Actual scoping on naming
+function Tensor(data::VarType, name::AbstractString="")
     newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
-    Variable(Nullable(), [], data, newName)
+    Tensor(Nullable(), [], data, newName)
 end
 
-function Func(outputs::Vector{Variable})
-    Func(get_graph(outputs), outputs, Vector{Variable}(), Dict{Variable, AbstractArray}())
+function Func(outputs::Vector{Tensor})
+    Func(get_graph(outputs), outputs, Vector{Tensor}(), Dict{Tensor, AbstractArray}())
 end
 
-function Func(outputs::Vector{Variable}, inputs::Vector{Variable})
-    Func(get_graph(union(outputs, inputs)), outputs, inputs, Dict{Variable, AbstractArray}())
+function Func(outputs::Vector{Tensor}, inputs::Vector{Tensor})
+    Func(get_graph(union(outputs, inputs)), outputs, inputs, Dict{Tensor, AbstractArray}())
 end
 
 function name{T <: Node}(n::T, str::AbstractString)
@@ -75,11 +82,11 @@ function name{T <: Node}(n::T, str::AbstractString)
     n
 end
 
-function apply(op::OpType, inputs::Vector{Variable}, name::AbstractString="")
+function apply(op::OpType, inputs::Vector{Tensor}, name::AbstractString="")
     #TODO: Is there a way to combine the var and apply creation? Perhaps an inner constructor?
     newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
-    var = Variable(TensorVal())
-    apply = Apply{Variable}(op, inputs, var, newName)
+    var = Tensor(Result())
+    apply = Operation{Tensor}(op, inputs, var, newName)
     var.owner = apply
     for i in inputs
         push!(i.clients, apply)
@@ -88,70 +95,44 @@ function apply(op::OpType, inputs::Vector{Variable}, name::AbstractString="")
 end
 
 ####
-# Variable Types
+# Possible Tensor node types
 ####
 
 # TODO: Decide whether everything is a matrix or not
 # SUPER TODO: Shape inference
 #### SUPER TODO: Broadcasting (see ?broadcast)
 
-abstract Tensor <: VarType
-
 # Use for constants which we write out explictly.
 # Define larger constant tensors (e.g. zeros, ones...) by ConstantOp(val, [shape])
 # similar for random.
-type TensorConstant <: Tensor
-    value::AbstractArray
-    shape::Vector{Int}
-end
+# Unclear this is necessary
+# type Constant <: Tensor
+#     shape::Shape
+#     value::Array
+# end
 
 # Values provided as input
-type Input <: Tensor
+immutable Placeholder <: VarType
+    shape::Shape
+end
+
+# Some value that is initialized once (by owner) and shared across runs
+immutable Variable <: VarType
+end
+
+# Values produced by Operation
+immutable Result <: VarType
     #shape::Vector{Int}
 end
 
-# Values produced by Apply
-type TensorVal <: Tensor
-    #shape::Vector{Int}
-end
-
-## Variable initialization
-
-abstract InitMethod
-
-type ConstantInit <: InitMethod
-    value::Real
-end
-
-function init(method::ConstantInit, shape::Vector{Int})
-    zeros(Float, tuple(shape...))
-end
-
-# Values which are initialized and potentially updated
-type TensorVar <: Tensor
-    shape::Vector{Int}
-    init::InitMethod
-end
-
-function init(var::TensorVar)
-    init(var.init, var.shape)
-end
-
-function variable(shape::Vector{Int}, method::InitMethod, name::AbstractString="")
-    Variable(TensorVar(shape, method), name)
-end
-
-function constant(val::Real, name::AbstractString="")
-    Variable(TensorConstant([val], [1,1]), name)
-end
-
-function constant(val::AbstractArray, name::AbstractString="")
-    Variable(TensorConstant(val, collect(size(val))), name)
+function variable(init::Tensor, name::AbstractString="")
+    # TODO: Cre
+    Tensor(Variable(), name)
 end
 
 # Specifies an input variable
-function input(name::AbstractString="")
-    Variable(Input(), name)
+function placeholder(shape::Shape, name::AbstractString="")
+    Tensor(Placeholder(shape), name)
 end
 
 ####
@@ -173,10 +154,26 @@ abstract ElementWise <: OpType
 abstract Activations <: ElementWise
 
 
-type Fill <: ConstantOp end
-type Zeros <: ConstantOp end
-type Ones <: ConstantOp end
-type OnesLike <: ConstantOp end
+immutable Zeros <: ConstantOp
+    shape::Shape
+end
+
+immutable ZerosLike <: ConstantOp end
+
+immutable Ones <: ConstantOp
+    shape::Shape
+end
+
+immutable OnesLike <: ConstantOp end
+
+immutable Fill <: ConstantOp
+    value::Real
+    shape::Shape
+end
+
+immutable Constant <: ConstantOp
+    value::Union{Array, Float}
+end
 
 # .+ and + are different, just support + and - for now
 type Add <: ElementWise end
@@ -231,13 +228,13 @@ end
 """
 @register_op  Mul (.*) 2
 Expands to
-function .*(a::Variable, b::Variable) apply(Mul(), [a, b]) end
+function .*(a::Tensor, b::Tensor) apply(Mul(), [a, b]) end
 """
 macro register_op(typ, op, narg)
     # TODO: Is there a way to interpolate an expr (like splat) into another expr with $ or similar?
     # For now, use Expr function (for which we can use splat).
     # Actually think it's pretty clear.
-    args, apply_args = gen_args(narg, Variable)
+    args, apply_args = gen_args(narg, Tensor)
     Expr(:function,
          Expr(:call,
               esc(op),
@@ -251,17 +248,17 @@ end
 """
 @register_grad Mul (a .* ds) (b .* ds)
  Expands to
-function grad(op::Mul, ds::Variable, a::Variable, b::Variable)
+function grad(op::Mul, ds::Tensor, a::Tensor, b::Tensor)
     [a .* ds, b .* grad_out]
 end
 """
 macro register_grad(typ, grads...)
-    args, _ = gen_args(length(grads), Variable)
+    args, _ = gen_args(length(grads), Tensor)
     Expr(:function,
          Expr(:call,
               esc(:grad),
               :(op::$typ),
-              :(ds::Variable),
+              :(ds::Tensor),
               args...),
          Expr(:vect,
               grads...))
@@ -298,11 +295,12 @@ end
 # Wrapper on fill
 #fill(val, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
 
-@register_op Fill        fill         2
-@register_op Zeros       zeros        1
-@register_op Ones        ones         1
+@register_op Zeros       zeros        0
+@register_op ZerosLike   zeros_like   1
+@register_op Ones        ones         0
 @register_op OnesLike    ones_like    1
-@register_op Dim         dim          1
+@register_op Fill        fill         0
+@register_op Shape         dim          1
 
 @register_op Add         (+)          2
 @register_op Sub         (-)          2
@@ -322,11 +320,12 @@ end
 
 ####
 
-@register_impl Fill         2   Base.fill(a[1], round(Int64, b)...)
-@register_impl Zeros        1   zeros(Float, Round(Int64, a)...)
-@register_impl Ones         1   ones(Float, Round(Int64, a)...)
+@register_impl Fill         0   Base.fill(op.value, op.shape.shape...)
+@register_impl Zeros        1   zeros(Float, op.shape.shape...)
+@register_impl ZerosLike    1   Base.zeros(a)
+@register_impl Ones         1   ones(Float, op.shape.shape...)
 @register_impl OnesLike     1   Base.ones(a)
-@register_impl Dim          1   collect(Int, size(a))
+@register_impl Dim          1   collect(Int, size(a))  # Probably not a good idea...
 
 @register_impl Add          2   a .+ b
 @register_impl Sub          2   a .- b
@@ -353,7 +352,7 @@ end
 @register_grad Transpose ds
 @register_grad Sigmoid (sigmoid(a) .* (ones_like(a) - sigmoid(a)) .* ds)
 #@register_grad Relu ((a .> zero(a[1])) .* ds)
-@register_grad Sum fill(ds, dim(a))
+@register_grad Sum ds .* ones_like(a)  # Only true if output is scalar
 
 
 ########################
@@ -361,10 +360,10 @@ end
 ########################
 
 # Numeric gradient of output with respect to `wrt`
-function numeric_grad(f::Func, wrt::Variable, value::AbstractArray, eps=0.001)
+function numeric_grad(f::Func, wrt::Tensor, value::AbstractArray, eps=0.001)
     argValue = float(value)
     result = zeros(value)
-    arg = Dict{Variable, AbstractArray}(wrt => argValue)
+    arg = Dict{Tensor, AbstractArray}(wrt => argValue)
     for i in 1:length(argValue)
         argValue[i] += eps
         res1 = interpretRetArgs(f, arg)[1]
@@ -377,20 +376,20 @@ function numeric_grad(f::Func, wrt::Variable, value::AbstractArray, eps=0.001)
     result
 end
 
-function grad(graph::Graph, out::Variable, wrt::Vector{Variable})
+function grad(graph::Graph, out::Tensor, wrt::Vector{Tensor})
     # Set of nodes on all paths between the set `wrt` and `out`
     downstream = influenced_by(wrt, true)
     upstream = influenced_by([out], false)
     on_path = intersect(upstream, downstream)
 
     toposorted = toposort(graph)
-    node_to_grad = Dict{Variable, Variable}(out => ones_like(out))
+    node_to_grad = Dict{Tensor, Tensor}(out => ones_like(out))
     for node = reverse(toposorted)
         if !(node in on_path)
             continue
         end
-        if isa(node, Variable)
-            # Variables should have grad calculated by the time we process them
+        if isa(node, Tensor)
+            # Tensor should have grad calculated by the time we process them
             @assert haskey(node_to_grad, node)
         else
             # Should have already computed output's gradient
@@ -418,7 +417,7 @@ end
 # Return set of nodes that are influenced in the DAG from any in set `nodes`
 # i.e. that would be influenced by in a computation
 # child=true means go to children in dag, false means go to parents
-function influenced_by(nodes::Vector{Variable}, child::Bool)
+function influenced_by(nodes::Vector{Tensor}, child::Bool)
     queue = Vector{Node}(nodes)
     influenced = Set{Node}(nodes)
     next_method = child ? succ : pred
@@ -442,7 +441,7 @@ end
 # Super slow interpret functions
 function interpret(f::Func, arguments::Tuple{AbstractArray})
     #@assert length(f.inputs) == length(arguments)
-    args = Dict{Variable, AbstractArray}()
+    args = Dict{Tensor, AbstractArray}()
     for (input, arg) = zip(f.inputs, arguments)
         args[input] = arg
     end
@@ -450,7 +449,7 @@ function interpret(f::Func, arguments::Tuple{AbstractArray})
 end
 
 # Return back list of output arguments in order
-function interpretRetArgs(f::Func, state::Dict{Variable, AbstractArray})
+function interpretRetArgs(f::Func, state::Dict{Tensor, AbstractArray})
     state = interpret(f, state)
     result = []
     for arg = f.outputs
@@ -461,14 +460,15 @@ function interpretRetArgs(f::Func, state::Dict{Variable, AbstractArray})
 end
 
 function initialize_function(f::Func)
-    values = Dict{Variable,AbstractArray}()
+    values = Dict{Tensor,AbstractArray}()
     for node = f.graph.nodes
         if isa(node, Variable)
-            if isa(node.data, TensorVar)
+            if isa(node.data, Placeholder)
                 values[node] = init(node.data)
-            elseif isa(node.data, TensorConstant)
-                values[node] = node.data.value
             end
+        # Doesn't work with ZerosLike etc.
+        # elseif node.op <: ConstantOp
+        #         values[node.output] = op(node.op, )
         end
     end
     return values
@@ -486,23 +486,23 @@ function interpret(f::Func, values::Dict{Variable, AbstractArray}=Dict{Variable,
             if !(node in keys(values))
                 if node in keys(f.defaults)
                     values[node] = f.defaults[node]
-                elseif isa(node.data, Input)
+                elseif isa(node.data, Placeholder)
                     @assert false && "Every input node must have a value"
                 elseif isa(node.data, TensorVar)
                     # Initialize if not explicitly given
                     #values[node] = init(node.data)
                     @assert false && "Call initialize_function first"
-                elseif isa(node.data, TensorConstant)
+                elseif isa(node.data, Constant)
                     #values[node] = node.data.value
                     @assert false && "Call initialize_function first"
-                elseif isa(node.data, TensorVal)
+                elseif isa(node.data, Result)
                     #print(tostring(node))
-                    @assert false && "Every TensorVal node must have a parent"
+                    @assert false && "Every Result node must have a parent"
                 else
                     @assert false && "Unknown Variable type"
                 end
             end
-        elseif isa(node, Apply)
+        elseif isa(node, Operation)
             args = []
             for arg = inputs(node)
                 @assert haskey(values, arg)
@@ -568,7 +568,7 @@ function hashNode(node::Variable)
     end
 end
 
-function hashNode(node::Apply)
+function hashNode(node::Operation)
     hash(node.op, hash(inputs))
 end
 
@@ -646,7 +646,7 @@ function to_dot(G::Graph)
     edges = Vector{AbstractString}()
     for node in G.nodes
         thisId = nodeIds[node]
-        shape = isa(node, Apply) ? "box" : "ellipse"
+        shape = isa(node, Operation) ? "box" : "ellipse"
         labelLine = string(thisId, " [shape=\"", shape,"\", label=\"", tostring(node), "\"];")
         push!(labels, labelLine)
         for next in succ(node)
@@ -677,7 +677,7 @@ function tostring(node::Variable)
     end
 end
 
-function tostring(node::Apply)
+function tostring(node::Operation)
     if !(isnull(node.name))
         return "$(get(node.name)): $(typeof(node.op))"
     else
