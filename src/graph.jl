@@ -15,11 +15,6 @@ abstract Node
 abstract VarType
 abstract OpType
 
-# TODO: Make this graph container more powerful / actually do something
-## build better graph abstraction, avoid repeated code
-immutable Graph
-    nodes::Set{Node}
-end
 
 immutable Shape
     shape::Vector{Int}  # length >= 0
@@ -44,12 +39,16 @@ type Tensor <: Node
     # Type?  All float for now
 end
 
-immutable Func
-    graph::Graph
-    outputs::Vector{Tensor}
-    inputs::Vector{Tensor}
-    defaults::Dict{Tensor, AbstractArray}
+immutable Session
 end
+
+immutable Graph
+    nodes::Set{Node}
+end
+
+# May use to have a notion of "default" graph
+# const Dict{Symbol, Graph} context
+# context[:default] = Graph(Set{Node}())
 
 # Accessors
 # TODO: Are accessors considered good style instead of accessing directly?
@@ -67,14 +66,6 @@ succ(n::Tensor) = n.clients::Vector{Operation}
 function Tensor(data::VarType, name::AbstractString="")
     newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
     Tensor(Nullable(), [], data, newName)
-end
-
-function Func(outputs::Vector{Tensor})
-    Func(get_graph(outputs), outputs, Vector{Tensor}(), Dict{Tensor, AbstractArray}())
-end
-
-function Func(outputs::Vector{Tensor}, inputs::Vector{Tensor})
-    Func(get_graph(union(outputs, inputs)), outputs, inputs, Dict{Tensor, AbstractArray}())
 end
 
 function name{T <: Node}(n::T, str::AbstractString)
@@ -126,8 +117,9 @@ immutable Result <: VarType
 end
 
 function variable(init::Tensor, name::AbstractString="")
-    # TODO: Cre
-    Tensor(Variable(), name)
+    # TODO: must have shape specified / be able to infer
+    output = copy(init)
+    output.data = Variable()
 end
 
 # Specifies an input variable
@@ -145,6 +137,8 @@ end
 # Additionally, can these be defined together with other parts of command?
 # Either reorganize or even have these created inside macro
 # (i.e. pass in `Zeros <: ConstantOp` as a parameter - probably unnecessary)
+
+# TODO: Make all ops that take arguments accept tensors as the argument
 
 # Create
 abstract CreateOp <: OpType
@@ -181,6 +175,7 @@ type Sub <: ElementWise end
 type Mul <: ElementWise end
 type Div <: ElementWise end
 type Neg <: ElementWise end
+type Copy <: ElementWise end
 
 type Sigmoid <: Activations end
 type Relu <: Activations end
@@ -300,7 +295,8 @@ end
 @register_op Ones        ones         0
 @register_op OnesLike    ones_like    1
 @register_op Fill        fill         0
-@register_op Shape         dim          1
+@register_op Shape       shape        1
+@register_op Copy        copy         1
 
 @register_op Add         (+)          2
 @register_op Sub         (-)          2
@@ -326,6 +322,8 @@ end
 @register_impl Ones         1   ones(Float, op.shape.shape...)
 @register_impl OnesLike     1   Base.ones(a)
 @register_impl Dim          1   collect(Int, size(a))  # Probably not a good idea...
+
+@register_impl Copy         1   a
 
 @register_impl Add          2   a .+ b
 @register_impl Sub          2   a .- b
@@ -360,7 +358,7 @@ end
 ########################
 
 # Numeric gradient of output with respect to `wrt`
-function numeric_grad(f::Func, wrt::Tensor, value::AbstractArray, eps=0.001)
+function numeric_grad(target::Tensor, wrt::Tensor, values::Dict{Tensor, AbstractArray}, eps=0.001)
     argValue = float(value)
     result = zeros(value)
     arg = Dict{Tensor, AbstractArray}(wrt => argValue)
@@ -438,63 +436,23 @@ end
 # Interpret Graph #
 ###################
 
-# Super slow interpret functions
-function interpret(f::Func, arguments::Tuple{AbstractArray})
-    #@assert length(f.inputs) == length(arguments)
-    args = Dict{Tensor, AbstractArray}()
-    for (input, arg) = zip(f.inputs, arguments)
-        args[input] = arg
-    end
-    interpret(f, args)
-end
-
-# Return back list of output arguments in order
-function interpretRetArgs(f::Func, state::Dict{Tensor, AbstractArray})
-    state = interpret(f, state)
-    result = []
-    for arg = f.outputs
-        @assert haskey(state, arg)
-        push!(result, get(state, arg, :impossible))
-    end
-    result
-end
-
-function initialize_function(f::Func)
-    values = Dict{Tensor,AbstractArray}()
-    for node = f.graph.nodes
-        if isa(node, Variable)
-            if isa(node.data, Placeholder)
-                values[node] = init(node.data)
-            end
-        # Doesn't work with ZerosLike etc.
-        # elseif node.op <: ConstantOp
-        #         values[node.output] = op(node.op, )
-        end
-    end
-    return values
-end
-
 # Takes dictionary mapping each already set variable to a state
 # Will not overwrite constants/variables which are already present
 # Return back dictionary representing current state
-function interpret(f::Func, values::Dict{Variable, AbstractArray}=Dict{Variable,AbstractArray}())
+# TODO: Will want the ability to provide ops that feed a placeholder variable
+function interpret(outputs::Vector{Node}, values::Dict{Tensor, AbstractArray}=Dict{Tensor,AbstractArray}())
     # Is something like T <: Real possible for AbstractArray in arguments?
 
-    order = toposort(f.graph)
+    # TODO - function to go up from node 
+    order = toposort(get_graph(outputs))
     for node = order
         if isa(node, Variable)
             if !(node in keys(values))
-                if node in keys(f.defaults)
-                    values[node] = f.defaults[node]
-                elseif isa(node.data, Placeholder)
+                if isa(node.data, Placeholder)
                     @assert false && "Every input node must have a value"
-                elseif isa(node.data, TensorVar)
+                elseif isa(node.data, Variable)
                     # Initialize if not explicitly given
-                    #values[node] = init(node.data)
-                    @assert false && "Call initialize_function first"
-                elseif isa(node.data, Constant)
-                    #values[node] = node.data.value
-                    @assert false && "Call initialize_function first"
+                    @assert false && "All Variables should be preinitialized"
                 elseif isa(node.data, Result)
                     #print(tostring(node))
                     @assert false && "Every Result node must have a parent"
