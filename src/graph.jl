@@ -39,6 +39,7 @@ type Tensor <: Node
     # Type?  All float for now
 end
 
+# TODO: Make this do a graph copy and precompute important values such as toposort
 immutable Session
 end
 
@@ -359,22 +360,22 @@ end
 
 # Numeric gradient of output with respect to `wrt`
 function numeric_grad(target::Tensor, wrt::Tensor, values::Dict{Tensor, AbstractArray}, eps=0.001)
-    argValue = float(value)
-    result = zeros(value)
-    arg = Dict{Tensor, AbstractArray}(wrt => argValue)
-    for i in 1:length(argValue)
-        argValue[i] += eps
-        res1 = interpretRetArgs(f, arg)[1]
-        argValue[i] -= 2eps
-        res2 = interpretRetArgs(f, arg)[1]
-        argValue[i] += eps
+    arg = values[target]
+    result = zeros(arg)
+    for i in 1:length(arg)
+        arg[i] += eps
+        res1 = interpret(wrt, values)[1]
+        arg[i] -= 2eps
+        res2 = interpret(wrt, values)[1]
+        arg[i] += eps
         @assert length(res1) == 1
         result[i] = (res1[1] - res2[1]) / 2eps
     end
     result
 end
 
-function grad(graph::Graph, out::Tensor, wrt::Vector{Tensor})
+# out w.r.t. each element of wrt
+function grad(out::Tensor, wrt::Vector{Tensor})
     # Set of nodes on all paths between the set `wrt` and `out`
     downstream = influenced_by(wrt, true)
     upstream = influenced_by([out], false)
@@ -404,11 +405,7 @@ function grad(graph::Graph, out::Tensor, wrt::Vector{Tensor})
             end
         end
     end
-    # Make sure they are all a part of it - TODO make this have less overhead
-    for node = get_connected(graph.nodes)
-        push!(graph.nodes, node)
-    end
-    node_to_grad
+    [node_to_grad[x] for x in wrt]
 end
 
 
@@ -435,6 +432,10 @@ end
 ###################
 # Interpret Graph #
 ###################
+
+function interpret(output::Node, values::Dict{Tensor, AbstractArray}=Dict{Tensor,AbstractArray}())
+    interpret([output], values)[1]
+end
 
 # Takes dictionary mapping each already set variable to a state
 # Will not overwrite constants/variables which are already present
@@ -479,7 +480,7 @@ function interpret(outputs::Vector{Node}, values::Dict{Tensor, AbstractArray}=Di
             values[node.output] = out
         end
     end
-    return values
+    [values[output] for output in outputs]
 end
 
 ## TODO: Transform to straight Julia source code
@@ -487,7 +488,7 @@ end
 ################
 # Optimization #
 ################
-
+# TODO: Make more specific optimizers (SGD etc.)
 function optimizeWrt(f, input::Variable, data::Array, loss::Variable, parameters::Vector{Variable}, max_steps::Int)
     gradients = grad(f.graph, loss, parameters)
 
