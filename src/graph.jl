@@ -66,7 +66,7 @@ succ(n::Tensor) = n.clients::Vector{Operation}
 # TODO: Actual scoping on naming
 function Tensor(data::VarType, name::AbstractString="")
     newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
-    Tensor(Nullable(), [], data, newName)
+    Tensor(Nullable(), [], data, newName, [])
 end
 
 function name{T <: Node}(n::T, str::AbstractString)
@@ -167,7 +167,11 @@ immutable Fill <: ConstantOp
 end
 
 immutable Constant <: ConstantOp
-    value::Union{Array, Float}
+    value::Union{Array, Real}
+end
+
+function constant(value::Union{Array, Real}, name::AbstractString="")
+    apply(Constant(value), Vector{Tensor}(), name)
 end
 
 # .+ and + are different, just support + and - for now
