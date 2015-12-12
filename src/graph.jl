@@ -6,6 +6,7 @@ importall Base.Operators
 importall Base
 
 typealias Float Float32
+typealias TensorValue Union{Real, Array}
 
 ###############
 # Basic types #
@@ -149,28 +150,17 @@ abstract ElementWise <: OpType
 abstract Activations <: ElementWise
 
 
-immutable Zeros <: ConstantOp
-    shape::Shape
-end
-
+immutable Zeros <: ConstantOp end
 immutable ZerosLike <: ConstantOp end
-
-immutable Ones <: ConstantOp
-    shape::Shape
-end
-
+immutable Ones <: ConstantOp end
 immutable OnesLike <: ConstantOp end
-
-immutable Fill <: ConstantOp
-    value::Real
-    shape::Shape
-end
+immutable Fill <: ConstantOp end
 
 immutable Constant <: ConstantOp
-    value::Union{Array, Real}
+    value::TensorValue
 end
 
-function constant(value::Union{Array, Real}, name::AbstractString="")
+function constant(value::TensorValue, name::AbstractString="")
     apply(Constant(value), Vector{Tensor}(), name)
 end
 
@@ -212,7 +202,7 @@ type InPlaceAdd <: OpType end
 # e.g. @createOp Add, add, [a, b], [g, g], a + b, [shape inference]
 #                type, name, args, gradients, implementation, [shape inference]
 
-function gen_args(narg, typ::DataType)
+function gen_args(narg, typ::Type)
     assert(narg >= 0)
     args = []
     apply_args = []
@@ -272,7 +262,7 @@ function op(op::Mul, a::AbstractArray, b::AbstractArray, c::AbstractArray)
 end
 """
 macro register_impl(typ, narg, impl)
-    args, _ = gen_args(narg, AbstractArray)
+    args, _ = gen_args(narg, TensorValue)
     Expr(:function,
          Expr(:call,
               esc(:op),
@@ -295,11 +285,11 @@ end
 # Wrapper on fill
 #fill(val, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
 
-@register_op Zeros       zeros        0
+@register_op Zeros       zeros        1
 @register_op ZerosLike   zeros_like   1
-@register_op Ones        ones         0
+@register_op Ones        ones         1
 @register_op OnesLike    ones_like    1
-@register_op Fill        fill         0
+@register_op Fill        fill         2
 @register_op Shape       shape        1
 @register_op Copy        copy         1
 
@@ -321,7 +311,8 @@ end
 
 ####
 
-@register_impl Fill         0   Base.fill(op.value, op.shape.shape...)
+@register_impl Constant     0   op.value
+@register_impl Fill         2   Base.fill(op.value, op.shape.shape...)
 @register_impl Zeros        1   zeros(Float, op.shape.shape...)
 @register_impl ZerosLike    1   Base.zeros(a)
 @register_impl Ones         1   ones(Float, op.shape.shape...)
@@ -363,7 +354,7 @@ end
 ########################
 
 # Numeric gradient of output with respect to `wrt`
-function numeric_grad(target::Tensor, wrt::Tensor, values::Dict{Tensor, AbstractArray}, eps=0.001)
+function numeric_grad(target::Tensor, wrt::Tensor, values::Dict{Tensor, TensorValue}, eps=0.001)
     arg = values[target]
     result = zeros(arg)
     for i in 1:length(arg)
@@ -437,7 +428,7 @@ end
 # Interpret Graph #
 ###################
 
-function interpret(output::Node, values::Dict{Tensor, AbstractArray}=Dict{Tensor,AbstractArray}())
+function interpret(output::Node, values::Dict{Tensor, TensorValue}=Dict{Tensor,TensorValue}())
     interpret([output], values)[1]
 end
 
@@ -445,9 +436,7 @@ end
 # Will not overwrite constants/variables which are already present
 # Return back dictionary representing current state
 # TODO: Will want the ability to provide ops that feed a placeholder variable
-function interpret(outputs::Vector{Node}, values::Dict{Tensor, AbstractArray}=Dict{Tensor,AbstractArray}())
-    # Is something like T <: Real possible for AbstractArray in arguments?
-
+function interpret{T <: Node}(outputs::Vector{T}, values::Dict{Tensor, TensorValue}=Dict{Tensor,TensorValue}())
     # TODO - function to go up from node 
     order = toposort(get_graph(outputs))
     for node = order
@@ -493,7 +482,7 @@ end
 # Optimization #
 ################
 # TODO: Make more specific optimizers (SGD etc.)
-function optimizeWrt(f, input::Variable, data::Array, loss::Variable, parameters::Vector{Variable}, max_steps::Int)
+function optimizeWrt(f, input::Variable, data::TensorValue, loss::Variable, parameters::Vector{Variable}, max_steps::Int)
     gradients = grad(f.graph, loss, parameters)
 
     state = initialize_function(f)
@@ -588,7 +577,7 @@ function get_connected{T <: Node}(nodes::Set{T})
     seen
 end
 
-function get_graph(nodes::Vector{Variable})
+function get_graph{T <: Node}(nodes::Vector{T})
     Graph(get_connected(Set(nodes)))
 end
 
