@@ -312,12 +312,13 @@ end
 ####
 
 @register_impl Constant     0   op.value
-@register_impl Fill         2   Base.fill(op.value, op.shape.shape...)
-@register_impl Zeros        1   zeros(Float, op.shape.shape...)
+# a = scalar, b = 1d array
+@register_impl Fill         2   Base.fill(a, b...)
+@register_impl Zeros        1   zeros(Float, a...)
 @register_impl ZerosLike    1   Base.zeros(a)
-@register_impl Ones         1   ones(Float, op.shape.shape...)
+@register_impl Ones         1   ones(Float, a...)
 @register_impl OnesLike     1   Base.ones(a)
-@register_impl Dim          1   collect(Int, size(a))  # Probably not a good idea...
+@register_impl Dim          1   collect(Int, size(a))
 
 @register_impl Copy         1   a
 
@@ -347,6 +348,8 @@ end
 @register_grad Sigmoid (sigmoid(a) .* (ones_like(a) - sigmoid(a)) .* ds)
 #@register_grad Relu ((a .> zero(a[1])) .* ds)
 @register_grad Sum ds .* ones_like(a)  # Only true if output is scalar
+
+# TODO How to treate OnesLike etc. in gradient computations?
 
 
 ########################
