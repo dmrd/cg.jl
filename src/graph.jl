@@ -17,9 +17,7 @@ abstract VarType
 abstract OpType
 
 
-immutable Shape
-    shape::Vector{Int}  # length >= 0
-end
+typealias Shape Vector{Int}
 
 # The lack of mutually recursive types is annoying
 # Use T <: Node and Operation{Tensor} instead
@@ -330,7 +328,9 @@ end
 @register_impl MatMul       2   a * b
 @register_impl Transpose    1   transpose(a)
 @register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end)
-@register_impl Sum          1   [Base.sum(a)]  # I seriously need to handle reals
+
+# I seriously need to handle reals - should this be len 1 matrix or a scalar?
+@register_impl Sum          1   [Base.sum(a)]
 
 # Could do in terms of basic ops
 @register_impl Sigmoid      1    (1.0 ./ (1.0 + exp(-a))) 
@@ -357,16 +357,19 @@ end
 ########################
 
 # Numeric gradient of output with respect to `wrt`
+
+
 function numeric_grad(target::Tensor, wrt::Tensor, values::Dict{Tensor, TensorValue}, eps=0.001)
-    arg = values[target]
+    arg = values[wrt]
     result = zeros(arg)
     for i in 1:length(arg)
         arg[i] += eps
-        res1 = interpret(wrt, values)[1]
+        res1 = interpret(target, values)
         arg[i] -= 2eps
-        res2 = interpret(wrt, values)[1]
+        res2 = interpret(target, values)
         arg[i] += eps
         @assert length(res1) == 1
+        @assert length(res2) == 1
         result[i] = (res1[1] - res2[1]) / 2eps
     end
     result
@@ -379,7 +382,7 @@ function grad(out::Tensor, wrt::Vector{Tensor})
     upstream = influenced_by([out], false)
     on_path = intersect(upstream, downstream)
 
-    toposorted = toposort(graph)
+    toposorted = toposort(get_graph([out]))
     node_to_grad = Dict{Tensor, Tensor}(out => ones_like(out))
     for node = reverse(toposorted)
         if !(node in on_path)
@@ -458,15 +461,19 @@ function interpret{T <: Node}(outputs::Vector{T}, values::Dict{Tensor, TensorVal
                 end
             end
         elseif isa(node, Operation)
-            args = []
+            args = Vector{TensorValue}()
             for arg = inputs(node)
                 @assert haskey(values, arg)
                 push!(args, get(values, arg, :impossible))
             end
             len = length(args)
+            @show node.op
             if len == 0
                 out = op(node.op)
             elseif len == 1
+                @show node.op
+                @show args
+                @show args[1]
                 out = op(node.op, args[1])
             elseif len == 2
                 out = op(node.op, args[1], args[2])
