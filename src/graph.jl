@@ -17,9 +17,7 @@ abstract VarType
 abstract OpType
 
 
-immutable Shape
-    shape::Vector{Int}  # length >= 0
-end
+typealias Shape Vector{Int}
 
 # The lack of mutually recursive types is annoying
 # Use T <: Node and Operation{Tensor} instead
@@ -92,8 +90,8 @@ end
 ####
 
 # TODO: Decide whether everything is a matrix or not
-# SUPER TODO: Shape inference
-#### SUPER TODO: Broadcasting (see ?broadcast)
+# TODO: Shape inference
+#### TODO: Broadcasting (see ?broadcast)
 
 # Use for constants which we write out explictly.
 # Define larger constant tensors (e.g. zeros, ones...) by ConstantOp(val, [shape])
@@ -122,6 +120,7 @@ function variable(init::Tensor, name::AbstractString="")
     # TODO: must have shape specified / be able to infer
     output = copy(init)
     output.data = Variable()
+    output
 end
 
 # Specifies an input variable
@@ -139,8 +138,6 @@ end
 # Additionally, can these be defined together with other parts of command?
 # Either reorganize or even have these created inside macro
 # (i.e. pass in `Zeros <: ConstantOp` as a parameter - probably unnecessary)
-
-# TODO: Make all ops that take arguments accept tensors as the argument
 
 # Create
 abstract CreateOp <: OpType
@@ -330,7 +327,9 @@ end
 @register_impl MatMul       2   a * b
 @register_impl Transpose    1   transpose(a)
 @register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end)
-@register_impl Sum          1   [Base.sum(a)]  # I seriously need to handle reals
+
+# I seriously need to handle reals - should this be len 1 matrix or a scalar?
+@register_impl Sum          1   [Base.sum(a)]
 
 # Could do in terms of basic ops
 @register_impl Sigmoid      1    (1.0 ./ (1.0 + exp(-a))) 
@@ -357,16 +356,19 @@ end
 ########################
 
 # Numeric gradient of output with respect to `wrt`
+
+
 function numeric_grad(target::Tensor, wrt::Tensor, values::Dict{Tensor, TensorValue}, eps=0.001)
-    arg = values[target]
+    arg = values[wrt]
     result = zeros(arg)
     for i in 1:length(arg)
         arg[i] += eps
-        res1 = interpret(wrt, values)[1]
+        res1 = interpret(target, values)
         arg[i] -= 2eps
-        res2 = interpret(wrt, values)[1]
+        res2 = interpret(target, values)
         arg[i] += eps
         @assert length(res1) == 1
+        @assert length(res2) == 1
         result[i] = (res1[1] - res2[1]) / 2eps
     end
     result
@@ -379,7 +381,7 @@ function grad(out::Tensor, wrt::Vector{Tensor})
     upstream = influenced_by([out], false)
     on_path = intersect(upstream, downstream)
 
-    toposorted = toposort(graph)
+    toposorted = toposort(get_graph([out]))
     node_to_grad = Dict{Tensor, Tensor}(out => ones_like(out))
     for node = reverse(toposorted)
         if !(node in on_path)
@@ -458,7 +460,7 @@ function interpret{T <: Node}(outputs::Vector{T}, values::Dict{Tensor, TensorVal
                 end
             end
         elseif isa(node, Operation)
-            args = []
+            args = Vector{TensorValue}()
             for arg = inputs(node)
                 @assert haskey(values, arg)
                 push!(args, get(values, arg, :impossible))
@@ -485,7 +487,7 @@ end
 # Optimization #
 ################
 # TODO: Make more specific optimizers (SGD etc.)
-function optimizeWrt(f, input::Variable, data::TensorValue, loss::Variable, parameters::Vector{Variable}, max_steps::Int)
+function optimizeWrt(input::Variable, data::TensorValue, loss::Variable, parameters::Vector{Variable}, max_steps::Int)
     gradients = grad(f.graph, loss, parameters)
 
     state = initialize_function(f)
