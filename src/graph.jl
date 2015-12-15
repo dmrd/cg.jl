@@ -118,6 +118,7 @@ end
 
 function variable(init::Tensor, name::AbstractString="")
     # TODO: must have shape specified / be able to infer
+    # TODO: Actually initialize variables once in a session
     output = copy(init)
     output.data = Variable()
     output
@@ -140,12 +141,15 @@ end
 # (i.e. pass in `Zeros <: ConstantOp` as a parameter - probably unnecessary)
 
 # Create
+
 abstract CreateOp <: OpType
 abstract ConstantOp <: CreateOp
 abstract RandomOp <: CreateOp  # TODO: Make these!
 abstract ElementWise <: OpType
 abstract Activations <: ElementWise
 
+# TODO: How to do control edges / grouping
+immutable Noop <: OpType end
 
 immutable Zeros <: ConstantOp end
 immutable ZerosLike <: ConstantOp end
@@ -279,6 +283,16 @@ end
     # max/min
     # common pointwise math (e.g. exp)
 
+# noop basics
+function noop(a::Tensor...)
+    apply(Noop(), collect(a))
+end
+
+function op(op::Noop, a::Tensor...)
+    1
+end
+
+
 # Wrapper on fill
 #fill(val, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
 
@@ -307,7 +321,6 @@ end
 #@register_op SoftMax     softmax      1
 
 ####
-
 @register_impl Constant     0   op.value
 # a = scalar, b = 1d array
 @register_impl Fill         2   Base.fill(a, b...)
@@ -486,28 +499,13 @@ end
 ################
 # Optimization #
 ################
-# TODO: Make more specific optimizers (SGD etc.)
-function optimizeWrt(input::Variable, data::TensorValue, loss::Variable, parameters::Vector{Variable}, max_steps::Int)
-    gradients = grad(f.graph, loss, parameters)
 
-    state = initialize_function(f)
-    state[input] = data
-    for steps = 1:max_steps
-        interpret(f, state)
-
-        for param = parameters
-            cur = state[param]
-            update = state[gradients[param]]
-            @show cur
-            @show update
-            @assert length(cur) == length(update)
-            for i = 1:length(cur)
-                cur[i] -= update[i]
-            end
-        end
-    end
-    #return map(x -> get(state, x, :ERROR), parameters)
-    return state
+# Create an optimize op and return 
+function sgdOptimizer(loss::Tensor, variables::Vector{Tensor}, step_size::Tensor)
+    gradients = grad(loss, variables)
+    step_sizes = map(grad -> step_size .* grad, gradients)
+    updates = map(vargrad -> plusequals(vargrad[1], (step_size .* vargrad[2])), zip(variables, gradients))
+    noop(updates...)
 end
 
 ####################
@@ -626,7 +624,7 @@ function render(G::Graph, outfile::AbstractString)
     run(pipeline(`echo $(dotstr)`, dotcmd))
 end
 
-function tostring(node::Variable)
+function tostring(node::Tensor)
     if !(isnull(node.name))
         return "$(get(node.name)): $(typeof(node.data))"
     else
