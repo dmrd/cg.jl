@@ -2,13 +2,12 @@ using cg
 using Base.Test
 
 # Test each operator
-function testGradients(out::cg.Tensor)
+function testGradients(out::cg.Node)
     G = cg.get_graph([out]);
-    inputs = filter(x -> isa(x, cg.Tensor) && isa(x.data, cg.Placeholder), G.nodes)
-    inputs = convert(Array{cg.Tensor, 1}, collect(inputs))
-    gradients = cg.grad(out, collect(cg.Tensor, inputs))
+    inputs = filter(x -> isa(x.op, cg.Placeholder), G.nodes)
+    gradients = cg.grad(out, inputs)
 
-    arguments = Dict{cg.Tensor, cg.TensorValue}()
+    arguments = Dict{cg.Node, cg.TensorValue}()
     for input = inputs
         arguments[input] = [1.0, 1.0, 1.0, 1.0] # Make random?
     end

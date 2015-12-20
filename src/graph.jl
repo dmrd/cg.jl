@@ -1,3 +1,5 @@
+# IN PROGRESS: Have only operations as a graph type
+
 # Few more basic op types, basic neural network!
 # Reorganize, make more general, cleanup
 # TODO: Figure out how to cleanly support scalars alongside 1x1 arrays
@@ -12,34 +14,29 @@ typealias TensorValue Union{Real, Array}
 # Basic types #
 ###############
 
-abstract Node
-abstract VarType
+typealias Shape Vector{Int}
 abstract OpType
 
-
-typealias Shape Vector{Int}
+# IN PROGRESS: REPLACE NODES T
 
 # The lack of mutually recursive types is annoying
 # Use T <: Node and Operation{Tensor} instead
 # TODO: Is there a better way to do this?
-type Operation{T <: Node} <: Node
+type Node
     op::OpType
-    inputs::Vector{T}
-    output::T
+    inputs::Vector{Node}
+    outputs::Vector{Node}
     name::Nullable{AbstractString}
+    #flags::Vector{Tuple{Symbol, Symbol}}
 end
 
-type Tensor <: Node
-    owner::Nullable{Operation}
-    clients::Vector{Operation}
-    data::VarType
-    name::Nullable{AbstractString}
-    flags::Vector{Tuple{Symbol, Symbol}}
-    # Type?  All float for now
-end
+pred(node::Node) = node.inputs
+succ(node::Node) = node.outputs
 
 # TODO: Make this do a graph copy and precompute important values such as toposort
 immutable Session
+    initialized::Bool
+    values::Dict{Node, TensorValue}
 end
 
 immutable Graph
@@ -50,22 +47,20 @@ end
 # const Dict{Symbol, Graph} context
 # context[:default] = Graph(Set{Node}())
 
-# Accessors
-# TODO: Are accessors considered good style instead of accessing directly?
-# TODO: Remove redundancies and reorganize
-inputs(n::Operation{Tensor}) = n.inputs::Vector{Tensor}
-output(n::Operation{Tensor}) = n.output::Tensor
-
-pred(n::Operation{Tensor}) = n.inputs::Vector{Tensor}
-succ(n::Operation{Tensor}) = [n.output]::Vector{Tensor}
-
-pred(n::Tensor) = isnull(n.owner) ? [] : [get(n.owner)]
-succ(n::Tensor) = n.clients::Vector{Operation}
-
 # TODO: Actual scoping on naming
-function Tensor(data::VarType, name::AbstractString="")
+function Node(data::OpType, name::AbstractString="")
     newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
-    Tensor(Nullable(), [], data, newName, [])
+    Node(data, Vector{Node}(), Vector{Node}(), newName)
+end
+
+function Node(op::OpType, inputs::Vector{Node}, name::AbstractString="")
+    #TODO: Is there a way to combine the var and apply creation? Perhaps an inner constructor?
+    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
+    node = Node(op, inputs, Vector{Node}(), newName)
+    for i in inputs
+        push!(i.outputs, node)
+    end
+    node
 end
 
 function name{T <: Node}(n::T, str::AbstractString)
@@ -73,75 +68,20 @@ function name{T <: Node}(n::T, str::AbstractString)
     n
 end
 
-function apply(op::OpType, inputs::Vector{Tensor}, name::AbstractString="")
-    #TODO: Is there a way to combine the var and apply creation? Perhaps an inner constructor?
-    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
-    var = Tensor(Result())
-    apply = Operation{Tensor}(op, inputs, var, newName)
-    var.owner = apply
-    for i in inputs
-        push!(i.clients, apply)
-    end
-    var
-end
-
-####
-# Possible Tensor node types
-####
-
-# TODO: Decide whether everything is a matrix or not
-# TODO: Shape inference
-#### TODO: Broadcasting (see ?broadcast)
-
-# Use for constants which we write out explictly.
-# Define larger constant tensors (e.g. zeros, ones...) by ConstantOp(val, [shape])
-# similar for random.
-# Unclear this is necessary
-# type Constant <: Tensor
-#     shape::Shape
-#     value::Array
-# end
-
-# Values provided as input
-immutable Placeholder <: VarType
-    shape::Shape
-end
-
-# Some value that is initialized once (by owner) and shared across runs
-immutable Variable <: VarType
-end
-
-# Values produced by Operation
-immutable Result <: VarType
-    #shape::Vector{Int}
-end
-
-function variable(init::Tensor, name::AbstractString="")
-    # TODO: must have shape specified / be able to infer
-    # TODO: Actually initialize variables once in a session
-    output = copy(init)
-    output.data = Variable()
-    output
-end
-
-# Specifies an input variable
-function placeholder(shape::Shape, name::AbstractString="")
-    Tensor(Placeholder(shape), name)
-end
 
 ####
 # Operations
 ####
 
+# TODO: Decide whether everything is a matrix or not
+# TODO: Shape inference
+#### TODO: Broadcasting (see ?broadcast)
 # TODO: Is there a better way than instantiating the op as the first argument?
 # TODO: Does this type hierarchy make any sense?  Think carefully about what's necessary
 # Also whether it needs a hierarchy at all.  Unclear if we make use of it anywhere
 # Additionally, can these be defined together with other parts of command?
-# Either reorganize or even have these created inside macro
-# (i.e. pass in `Zeros <: ConstantOp` as a parameter - probably unnecessary)
 
-# Create
-
+abstract VarOp <: OpType
 abstract CreateOp <: OpType
 abstract ConstantOp <: CreateOp
 abstract RandomOp <: CreateOp  # TODO: Make these!
@@ -157,12 +97,35 @@ immutable Ones <: ConstantOp end
 immutable OnesLike <: ConstantOp end
 immutable Fill <: ConstantOp end
 
+# Values provided as input
+immutable Placeholder <: VarOp
+    shape::Shape
+end
+
+# Some value that is initialized once (by owner) and shared across runs
+immutable Variable <: VarOp
+    init::Node
+    initialized::Bool
+end
+
 immutable Constant <: ConstantOp
     value::TensorValue
 end
 
+# Specifies a mutable value
+function variable(init::Node, name::AbstractString="")
+    # TODO: must have shape specified / be able to infer
+    # TODO: Actually initialize variables once in a session
+    Node(Variable(init, false), name)
+end
+
+# Specifies an input variable
+function placeholder(shape::Shape, name::AbstractString="")
+    Node(Placeholder(shape), name)
+end
+
 function constant(value::TensorValue, name::AbstractString="")
-    apply(Constant(value), Vector{Tensor}(), name)
+    Node(Constant(value), name)
 end
 
 # .+ and + are different, just support + and - for now
@@ -219,19 +182,19 @@ end
 """
 @register_op  Mul (.*) 2
 Expands to
-function .*(a::Tensor, b::Tensor) apply(Mul(), [a, b]) end
+function .*(a::Node, b::Node) apply(Mul(), [a, b]) end
 """
 macro register_op(typ, op, narg)
     # TODO: Is there a way to interpolate an expr (like splat) into another expr with $ or similar?
     # For now, use Expr function (for which we can use splat).
     # Actually think it's pretty clear.
-    args, apply_args = gen_args(narg, Tensor)
+    args, apply_args = gen_args(narg, Node)
     Expr(:function,
          Expr(:call,
               esc(op),
               args...),
          Expr(:call,
-              :apply,
+              :Node,
               Expr(:call, typ),
               Expr(:vect, apply_args...)))
 end
@@ -239,17 +202,17 @@ end
 """
 @register_grad Mul (a .* ds) (b .* ds)
  Expands to
-function grad(op::Mul, ds::Tensor, a::Tensor, b::Tensor)
+function grad(op::Mul, ds::Node, a::Node, b::Node)
     [a .* ds, b .* grad_out]
 end
 """
 macro register_grad(typ, grads...)
-    args, _ = gen_args(length(grads), Tensor)
+    args, _ = gen_args(length(grads), Node)
     Expr(:function,
          Expr(:call,
               esc(:grad),
               :(op::$typ),
-              :(ds::Tensor),
+              :(ds::Node),
               args...),
          Expr(:vect,
               grads...))
@@ -284,17 +247,16 @@ end
     # common pointwise math (e.g. exp)
 
 # noop basics
-function noop(a::Tensor...)
-    apply(Noop(), collect(a))
+function noop(a::Node...)
+    Node(Noop(), collect(a))
 end
 
-function op(op::Noop, a::Tensor...)
+function op(op::Noop, a::Node...)
     1
 end
 
-
 # Wrapper on fill
-#fill(val, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
+fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
 
 @register_op Zeros       zeros        1
 @register_op ZerosLike   zeros_like   1
@@ -371,7 +333,7 @@ end
 # Numeric gradient of output with respect to `wrt`
 
 
-function numeric_grad(target::Tensor, wrt::Tensor, values::Dict{Tensor, TensorValue}, eps=0.001)
+function numeric_grad(target::Node, wrt::Node, values::Dict{Node, TensorValue}, eps=0.001)
     arg = values[wrt]
     result = zeros(arg)
     for i in 1:length(arg)
@@ -388,33 +350,29 @@ function numeric_grad(target::Tensor, wrt::Tensor, values::Dict{Tensor, TensorVa
 end
 
 # out w.r.t. each element of wrt
-function grad(out::Tensor, wrt::Vector{Tensor})
+function grad(out::Node, wrt::Vector{Node})
     # Set of nodes on all paths between the set `wrt` and `out`
     downstream = influenced_by(wrt, true)
     upstream = influenced_by([out], false)
     on_path = intersect(upstream, downstream)
 
     toposorted = toposort(get_graph([out]))
-    node_to_grad = Dict{Tensor, Tensor}(out => ones_like(out))
+    node_to_outgrad = Dict{Node, Node}(out => ones_like(out))
+    node_to_ingrad = Dict{Node, Node}()
     for node = reverse(toposorted)
         if !(node in on_path)
             continue
         end
-        if isa(node, Tensor)
-            # Tensor should have grad calculated by the time we process them
-            @assert haskey(node_to_grad, node)
-        else
-            # Should have already computed output's gradient
-            @assert haskey(node_to_grad, node.output)
-            gradients = grad(node.op, node_to_grad[node.output], inputs(node)...)
-            for (original, gradient) in zip(inputs(node), gradients)
-                if original in on_path
-                    node_to_grad[original] = gradient
-                    if !isnull(original.name)
-                        name(gradient, "G:$(get(original.name))")
-                    end
-                    #original .= gradient
+        # Should have already computed output's gradient
+        @assert haskey(node_to_grad, node)
+        gradients = grad(node.op, node_to_grad[node], node.inputs...)
+        for (original, gradient) in zip(node.inputs, gradients)
+            if original in on_path
+                node_to_grad[original] = gradient
+                if !isnull(original.name)
+                    name(gradient, "G:$(get(original.name))")
                 end
+                #original .= gradient
             end
         end
     end
@@ -425,7 +383,7 @@ end
 # Return set of nodes that are influenced in the DAG from any in set `nodes`
 # i.e. that would be influenced by in a computation
 # child=true means go to children in dag, false means go to parents
-function influenced_by(nodes::Vector{Tensor}, child::Bool)
+function influenced_by(nodes::Vector{Node}, child::Bool)
     queue = Vector{Node}(nodes)
     influenced = Set{Node}(nodes)
     next_method = child ? succ : pred
@@ -446,7 +404,7 @@ end
 # Interpret Graph #
 ###################
 
-function interpret(output::Node, values::Dict{Tensor, TensorValue}=Dict{Tensor,TensorValue}())
+function interpret(output::Node, values::Dict{Node, TensorValue}=Dict{Node, TensorValue}())
     interpret([output], values)[1]
 end
 
@@ -454,27 +412,20 @@ end
 # Will not overwrite constants/variables which are already present
 # Return back dictionary representing current state
 # TODO: Will want the ability to provide ops that feed a placeholder variable
-function interpret{T <: Node}(outputs::Vector{T}, values::Dict{Tensor, TensorValue}=Dict{Tensor,TensorValue}())
+function interpret(outputs::Vector{Node}, values::Dict{Node, TensorValue}=Dict{Node,TensorValue}())
     # TODO - function to go up from node 
     order = toposort(get_graph(outputs))
     for node = order
-        if isa(node, Variable)
-            if !(node in keys(values))
-                if isa(node.data, Placeholder)
-                    @assert false && "Every input node must have a value"
-                elseif isa(node.data, Variable)
-                    # Initialize if not explicitly given
-                    @assert false && "All Variables should be preinitialized"
-                elseif isa(node.data, Result)
-                    #print(tostring(node))
-                    @assert false && "Every Result node must have a parent"
-                else
-                    @assert false && "Unknown Variable type"
-                end
-            end
-        elseif isa(node, Operation)
+        if isa(node.op, Placeholder) && !(node in keys(values))
+            @assert false && "Every input node must have a value"
+        elseif isa(node.op, Variable) && !node.op.initialized
+            # Initialize if not explicitly given
+            @assert false && "All Variables should be preinitialized"
+        elseif isa(node.op, Constant) && !(node in keys(values))
+            values[node] = node.op.value
+        else
             args = Vector{TensorValue}()
-            for arg = inputs(node)
+            for arg = node.inputs
                 @assert haskey(values, arg)
                 push!(args, get(values, arg, :impossible))
             end
@@ -488,7 +439,7 @@ function interpret{T <: Node}(outputs::Vector{T}, values::Dict{Tensor, TensorVal
             else
                 @assert "We have ops with more args now!?"
             end
-            values[node.output] = out
+            values[node] = out
         end
     end
     [values[output] for output in outputs]
@@ -501,7 +452,7 @@ end
 ################
 
 # Create an optimize op and return 
-function sgdOptimizer(loss::Tensor, variables::Vector{Tensor}, step_size::Tensor)
+function sgdOptimizer(loss::Node, variables::Vector{Node}, step_size::Node)
     gradients = grad(loss, variables)
     step_sizes = map(grad -> step_size .* grad, gradients)
     updates = map(vargrad -> plusequals(vargrad[1], (step_size .* vargrad[2])), zip(variables, gradients))
@@ -514,17 +465,13 @@ end
 
 
 # Node hashing for use in deduping computation graphs
-function hashNode(node::Variable)
-    # TODO: Cleaner chaining?
-    if isnull(node.owner)
-        return hash(node.data)
-    else
-        hash(node.owner, hash(data))
+# Hash node itself, then recursively add in hashes of parents
+function hashNode(node::Node)
+    res = UInt64(node.op)
+    for input = node.inputs
+        res = hash(hash(input), res)
     end
-end
-
-function hashNode(node::Operation)
-    hash(node.op, hash(inputs))
+    res
 end
 
 # Returns nodes in topological order
@@ -556,7 +503,7 @@ function toposort(graph::Graph)
 end
 
 # Return graph consisting of all nodes connected to given Variables
-function get_connected{T <: Node}(nodes::Set{T})
+function get_connected(nodes::Set{Node})
     stack = collect(Node, nodes)
     seen = Set{Node}(nodes)
     while !isempty(stack)
@@ -580,7 +527,7 @@ function get_connected{T <: Node}(nodes::Set{T})
     seen
 end
 
-function get_graph{T <: Node}(nodes::Vector{T})
+function get_graph(nodes::Vector{Node})
     Graph(get_connected(Set(nodes)))
 end
 
@@ -601,7 +548,8 @@ function to_dot(G::Graph)
     edges = Vector{AbstractString}()
     for node in G.nodes
         thisId = nodeIds[node]
-        shape = isa(node, Operation) ? "box" : "ellipse"
+        #shape = isa(node, Operation) ? "box" : "ellipse"
+        shape = "ellipse"
         labelLine = string(thisId, " [shape=\"", shape,"\", label=\"", tostring(node), "\"];")
         push!(labels, labelLine)
         for next in succ(node)
@@ -624,23 +572,16 @@ function render(G::Graph, outfile::AbstractString)
     run(pipeline(`echo $(dotstr)`, dotcmd))
 end
 
-function tostring(node::Tensor)
+function tostring(node::Node)
+    # TODO - include values for constants
     if !(isnull(node.name))
-        return "$(get(node.name)): $(typeof(node.data))"
+        return "$(get(node.name)): $(typeof(node.op))"
     else
         return "$(typeof(node.data))"
     end
 end
 
-function tostring(node::Operation)
-    if !(isnull(node.name))
-        return "$(get(node.name)): $(typeof(node.op))"
-    else
-        return "$(typeof(node.op))"
-    end
-end
-
-function tostring{T <: Node}(nodes::Vector{T})
+function tostring(nodes::Vector{Node})
     c = ", "
     "[$(join(map(tostring, nodes), c))]"
 end
