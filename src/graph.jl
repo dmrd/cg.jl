@@ -201,21 +201,18 @@ macro register_op(typ, op, narg)
          Expr(:call,
               esc(op),
               args...,
+              Expr(:kw,
+                   Expr(:(::),
+                        :name,
+                        :AbstractString),
+                   ""
+                   )
               ),
-         #
          Expr(:call,
               :Node,
               Expr(:call, typ),
-              Expr(:vect, apply_args...)))
-    # Expr to add in optional name argument
-    # 4: Expr
-    #   head: Symbol kw
-    #   args: Array(Any,(2,))
-    #     1: Expr
-    #       head: Symbol ::
-    #       args: Array(Any,(2,))
-    #       typ: Any
-    #     2: ASCIIString ""
+              Expr(:vect, apply_args...),
+              :name))
 end
 
 """
@@ -240,7 +237,7 @@ end
 """
 @register_impl Mul 3 (a + b + c)
 Expands to
-function op(op::Mul, a::TensorValue, b::TensorValue, c::TensorValue)
+function call(op::Mul, a::TensorValue, b::TensorValue, c::TensorValue)
     a + b + c
 end
 """
@@ -248,7 +245,7 @@ macro register_impl(typ, narg, impl)
     args, _ = gen_args(narg, TensorValue)
     Expr(:function,
          Expr(:call,
-              esc(:op),
+              esc(:call),
               :(op::$typ),
               args...),
          impl)
@@ -271,7 +268,7 @@ function noop(a::Node...)
 end
 
 # Just have it return a scalar until theres some notion of ordering
-function op(op::Noop, a::TensorValue...)
+function call(op::Noop, a::TensorValue...)
     1
 end
 
@@ -303,8 +300,6 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 #@register_op SoftMax     softmax      1
 
 ####
-
-# TODO: use `call` instead
 
 @register_impl Constant     0   op.value
 # a = scalar, b = 1d array
@@ -492,7 +487,7 @@ function interpret(session::Session, outputs::Vector{Node})
                 push!(args, get(session.values, arg, :impossible))
             end
             len = length(args)
-            session.values[node] = op(node.op, args...)
+            session.values[node] = node.op(args...)
         end
     end
     [session.values[output] for output in outputs]
