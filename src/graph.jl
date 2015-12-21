@@ -35,8 +35,25 @@ succ(node::Node) = node.outputs
 
 # TODO: Make this do a graph copy and precompute important values such as toposort
 immutable Session
-    initialized::Bool
+    nodes::Vector{Node}  # Parts of graph stored in topological order
+    # [x,y,z] => precomputed order to compute nodes to get x,y, and z
+    evalOrder::Dict{Vector{Node}, Vector{Node}}
     values::Dict{Node, TensorValue}
+
+    # TODO: How to handle (a) groups, and (b) initialization variables
+    function Session(output::Node)
+        # Nodes at time this session was created
+        nodes = toposort(get_graph([output]))
+        new(nodes, Dict{Node, Vector{Node}}(), Dict{Node, TensorValue}())
+    end
+end
+
+# Get order to evaluate the graph in.  Takes nodes from the graph which initialized the session
+function getOrder(session::Session, outputs::Vector{Node})
+    if !haskey(session.evalOrder, outputs)
+        session.evalOrder[outputs] = toposort_on_path(outputs)
+    end
+    session.evalOrder[outputs]
 end
 
 immutable Graph
@@ -348,14 +365,14 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 # Numeric gradient of output with respect to `wrt`
 
 
-function numeric_grad(target::Node, wrt::Node, values::Dict{Node, TensorValue}, eps=0.001)
-    arg = values[wrt]
+function numeric_grad(session::Session, target::Node, wrt::Node, eps=0.001)
+    arg = session.values[wrt]
     result = zeros(arg)
     for i in 1:length(arg)
         arg[i] += eps
-        res1 = copy(interpret(target, values))
+        res1 = copy(interpret(session, target))
         arg[i] -= 2eps
-        res2 = copy(interpret(target, values))
+        res2 = copy(interpret(session, target))
         arg[i] += eps
         @assert length(res1) == 1
         @assert length(res2) == 1
@@ -364,30 +381,36 @@ function numeric_grad(target::Node, wrt::Node, values::Dict{Node, TensorValue}, 
     result
 end
 
+function nodes_on_path(sink::Vector{Node}, source::Vector{Node}=Vector{Node}())
+    downstream = influenced_by(source, true)
+    upstream = influenced_by(sink, false)
+    if length(source) > 0
+        intersect(upstream, downstream)
+    else
+        upstream
+    end
+     
+end
+
+function toposort_on_path(sink::Vector{Node}, source::Vector{Node}=Vector{Node}())
+    nodes = nodes_on_path(sink, source)
+    toposorted = toposort(get_graph(union(sink, source)))
+    intersect(toposorted, nodes)
+end
+
 # out w.r.t. each element of wrt
 function grad(out::Node, wrt::Vector{Node})
-    # Set of nodes on all paths between the set `wrt` and `out`
-    downstream = influenced_by(wrt, true)
-    upstream = influenced_by([out], false)
-    on_path = intersect(upstream, downstream)
-
-    toposorted = toposort(get_graph([out]))
-
     # input gradients = derivative w.r.t. input - may be different for the nth and n+1th argument
     # output gradient = derivative w.r.t. output (i.e. before we apply this node's grad)
 
     # When we process a node, associate its input gradient with the appropriate input
-    node_to_grad_vec = Dict{Node, Vector{Node}}()
+    node_to_grad_vec = Dict{Node, Vector{Node}}(out => [ones_like(out)])
 
     # Map a node to its single output (usually sum of all output gradients)
     node_to_grad = Dict{Node, Node}()
 
-    node_to_grad_vec[out] = [ones_like(out)];
-    for node = reverse(toposorted)
-        if !(node in on_path)
-            continue
-        end
-
+    # Set of nodes on all paths between the set `wrt` and `out`
+    for node = reverse(toposort_on_path([out], wrt))
         # Compute the gradient w.r.t. the node's output
         @assert haskey(node_to_grad_vec, node)
         grads = node_to_grad_vec[node]
@@ -445,44 +468,42 @@ end
 # Interpret Graph #
 ###################
 
-function interpret(output::Node, values::Dict{Node, TensorValue}=Dict{Node, TensorValue}())
-    interpret([output], values)[1]
+function interpret(session::Session, output::Node)
+    interpret(session, [output])[1]
 end
 
 # Takes dictionary mapping each already set variable to a state
 # Will not overwrite constants/variables which are already present
 # Return back dictionary representing current state
 # TODO: Will want the ability to provide ops that feed a placeholder variable
-function interpret(outputs::Vector{Node}, values::Dict{Node, TensorValue}=Dict{Node,TensorValue}())
-    # TODO - function to go up from node instead of evaluating entire thing! use on_path?
-    order = toposort(get_graph(outputs))
-    for node = order
+function interpret(session::Session, outputs::Vector{Node})
+    for node in getOrder(session, outputs)
         # Handle various input types separately from normal
         if isa(node.op, Placeholder)
             # TODO: Not the actual behavior of placeholders - should have a loader of some kind
-            if !haskey(values, node)
+            if !haskey(session.values, node)
                 @assert false && "Every input node must have a value"
             end
         elseif isa(node.op, Variable)
-            if !haskey(values, node)
+            if !haskey(session.values, node)
                 # lol recursion - could be a bad time later
-                values[node] = interpret(node.op.init, values)
+                session.values[node] = interpret(session, node.op.init)
             end
         elseif isa(node.op, Constant)
-            if !(node in keys(values))
-                values[node] = node.op.value
+            if !(node in keys(session.values))
+                session.values[node] = node.op.value
             end
         else
             args = Vector{TensorValue}()
             for arg = node.inputs
-                @assert haskey(values, arg)
-                push!(args, get(values, arg, :impossible))
+                @assert haskey(session.values, arg)
+                push!(args, get(session.values, arg, :impossible))
             end
             len = length(args)
-            values[node] = op(node.op, args...)
+            session.values[node] = op(node.op, args...)
         end
     end
-    [values[output] for output in outputs]
+    [session.values[output] for output in outputs]
 end
 
 ## TODO: Transform to straight Julia source code

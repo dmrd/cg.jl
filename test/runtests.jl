@@ -8,14 +8,14 @@ function testGradients(out::cg.Node)
     inputs = collect(inputs)
     gradients = cg.grad(out, inputs)
 
-    arguments = Dict{cg.Node, cg.TensorValue}()
+    session = cg.Session(out)
     for input = inputs
-        arguments[input] = [1.0, 1.0, 1.0, 1.0] # Make random?
+        session.values[input] = [1.0, 1.0, 1.0, 1.0] # Make random?
     end
 
     for (input,grad) = zip(inputs, gradients)
-        numeric = cg.numeric_grad(out, input, arguments, 0.0001)
-        symbolic = cg.interpret(grad, arguments)
+        numeric = cg.numeric_grad(session, out, input, 0.0001)
+        symbolic = cg.interpret(session, grad)
         @show numeric
         @show symbolic
         @test_approx_eq_eps(symbolic, numeric, 0.0001)
@@ -48,13 +48,14 @@ function testSgdBasic()
     values = Dict{cg.Node, cg.TensorValue}()
     optimizer = cg.sgdOptimizer(e, [b], cg.constant(0.001, "step_size"))
     cg.render(cg.get_graph([b]), "graph.png")
+    session = cg.Session(optimizer)
     for i = 1:10000
-        cg.interpret(optimizer, values)
-        if values[e][1] <= 0.001
+        cg.interpret(session, optimizer)
+        if session.values[e][1] <= 0.001
             break
         end
     end
-    @test_approx_eq_eps target values[b] 0.1
+    @test_approx_eq_eps target session.values[b] 0.1
 end
 
 testGradients()
