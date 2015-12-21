@@ -63,7 +63,7 @@ function Node(op::OpType, inputs::Vector{Node}, name::AbstractString="")
     node
 end
 
-function name{T <: Node}(n::T, str::AbstractString)
+function name(n::Node, str::AbstractString)
     n.name = Nullable(str)
     n
 end
@@ -102,10 +102,9 @@ immutable Placeholder <: VarOp
     shape::Shape
 end
 
-# Some value that is initialized once (by owner) and shared across runs
+# Some value that is initialized once (on first run) and shared across runs
 immutable Variable <: VarOp
     init::Node
-    initialized::Bool
 end
 
 immutable Constant <: ConstantOp
@@ -116,7 +115,7 @@ end
 function variable(init::Node, name::AbstractString="")
     # TODO: must have shape specified / be able to infer
     # TODO: Actually initialize variables once in a session
-    Node(Variable(init, false), name)
+    Node(Variable(init), name)
 end
 
 # Specifies an input variable
@@ -192,11 +191,22 @@ macro register_op(typ, op, narg)
     Expr(:function,
          Expr(:call,
               esc(op),
-              args...),
+              args...,
+              ),
+         #
          Expr(:call,
               :Node,
               Expr(:call, typ),
               Expr(:vect, apply_args...)))
+    # Expr to add in optional name argument
+    # 4: Expr
+    #   head: Symbol kw
+    #   args: Array(Any,(2,))
+    #     1: Expr
+    #       head: Symbol ::
+    #       args: Array(Any,(2,))
+    #       typ: Any
+    #     2: ASCIIString ""
 end
 
 """
@@ -221,7 +231,7 @@ end
 """
 @register_impl Mul 3 (a + b + c)
 Expands to
-function op(op::Mul, a::AbstractArray, b::AbstractArray, c::AbstractArray)
+function op(op::Mul, a::TensorValue, b::TensorValue, c::TensorValue)
     a + b + c
 end
 """
@@ -251,7 +261,8 @@ function noop(a::Node...)
     Node(Noop(), collect(a))
 end
 
-function op(op::Noop, a::Node...)
+# Just have it return a scalar until theres some notion of ordering
+function op(op::Noop, a::TensorValue...)
     1
 end
 
@@ -283,6 +294,9 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 #@register_op SoftMax     softmax      1
 
 ####
+
+# TODO: use `call` instead
+
 @register_impl Constant     0   op.value
 # a = scalar, b = 1d array
 @register_impl Fill         2   Base.fill(a, b...)
@@ -301,7 +315,8 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 @register_impl Neg          1   (-a)
 @register_impl MatMul       2   a * b
 @register_impl Transpose    1   transpose(a)
-@register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end)
+# Return scalar for now
+@register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end; 1)
 
 # I seriously need to handle reals - should this be len 1 matrix or a scalar?
 @register_impl Sum          1   [Base.sum(a)]
@@ -338,9 +353,9 @@ function numeric_grad(target::Node, wrt::Node, values::Dict{Node, TensorValue}, 
     result = zeros(arg)
     for i in 1:length(arg)
         arg[i] += eps
-        res1 = interpret(target, values)
+        res1 = copy(interpret(target, values))
         arg[i] -= 2eps
-        res2 = interpret(target, values)
+        res2 = copy(interpret(target, values))
         arg[i] += eps
         @assert length(res1) == 1
         @assert length(res2) == 1
@@ -357,22 +372,48 @@ function grad(out::Node, wrt::Vector{Node})
     on_path = intersect(upstream, downstream)
 
     toposorted = toposort(get_graph([out]))
-    node_to_outgrad = Dict{Node, Node}(out => ones_like(out))
-    node_to_ingrad = Dict{Node, Node}()
+
+    # input gradients = derivative w.r.t. input - may be different for the nth and n+1th argument
+    # output gradient = derivative w.r.t. output (i.e. before we apply this node's grad)
+
+    # When we process a node, associate its input gradient with the appropriate input
+    node_to_grad_vec = Dict{Node, Vector{Node}}()
+
+    # Map a node to its single output (usually sum of all output gradients)
+    node_to_grad = Dict{Node, Node}()
+
+    node_to_grad_vec[out] = [ones_like(out)];
     for node = reverse(toposorted)
         if !(node in on_path)
             continue
         end
-        # Should have already computed output's gradient
-        @assert haskey(node_to_grad, node)
-        gradients = grad(node.op, node_to_grad[node], node.inputs...)
-        for (original, gradient) in zip(node.inputs, gradients)
-            if original in on_path
-                node_to_grad[original] = gradient
-                if !isnull(original.name)
-                    name(gradient, "G:$(get(original.name))")
+
+        # Compute the gradient w.r.t. the node's output
+        @assert haskey(node_to_grad_vec, node)
+        grads = node_to_grad_vec[node]
+        if (length(grads) == 1)
+            output_grad = node_to_grad_vec[node][1]
+        else
+            # Sum up the gradients of all the outputs
+            output_grad = foldr((sum, next) -> sum + next, grads)
+        end
+        if !isnull(node.name)
+            name(output_grad, "Gin:$(get(node.name))")
+        end
+        node_to_grad[node] = output_grad
+
+
+        if (length(node.inputs) > 0)
+            # If the node has inputs, calculate the gradient w.r.t their outputs along this path
+            input_grads = grad(node.op, output_grad, node.inputs...)
+            for (input_node, grad) = zip(node.inputs, input_grads)
+                if (!haskey(node_to_grad_vec, input_node))
+                    node_to_grad_vec[input_node] = Vector{Node}()
                 end
-                #original .= gradient
+                if !isnull(grad.name)
+                    name(output_grad, "Gout:$(get(input_node.name))")
+                end
+                push!(node_to_grad_vec[input_node], grad)
             end
         end
     end
@@ -384,8 +425,8 @@ end
 # i.e. that would be influenced by in a computation
 # child=true means go to children in dag, false means go to parents
 function influenced_by(nodes::Vector{Node}, child::Bool)
-    queue = Vector{Node}(nodes)
-    influenced = Set{Node}(nodes)
+    queue = copy(nodes)
+    influenced = Set{Node}(queue)
     next_method = child ? succ : pred
     while !isempty(queue)
         next = pop!(queue)
@@ -413,16 +454,24 @@ end
 # Return back dictionary representing current state
 # TODO: Will want the ability to provide ops that feed a placeholder variable
 function interpret(outputs::Vector{Node}, values::Dict{Node, TensorValue}=Dict{Node,TensorValue}())
-    # TODO - function to go up from node 
+    # TODO - function to go up from node instead of evaluating entire thing! use on_path?
     order = toposort(get_graph(outputs))
     for node = order
-        if isa(node.op, Placeholder) && !(node in keys(values))
-            @assert false && "Every input node must have a value"
-        elseif isa(node.op, Variable) && !node.op.initialized
-            # Initialize if not explicitly given
-            @assert false && "All Variables should be preinitialized"
-        elseif isa(node.op, Constant) && !(node in keys(values))
-            values[node] = node.op.value
+        # Handle various input types separately from normal
+        if isa(node.op, Placeholder)
+            # TODO: Not the actual behavior of placeholders - should have a loader of some kind
+            if !haskey(values, node)
+                @assert false && "Every input node must have a value"
+            end
+        elseif isa(node.op, Variable)
+            if !haskey(values, node)
+                # lol recursion - could be a bad time later
+                values[node] = interpret(node.op.init, values)
+            end
+        elseif isa(node.op, Constant)
+            if !(node in keys(values))
+                values[node] = node.op.value
+            end
         else
             args = Vector{TensorValue}()
             for arg = node.inputs
@@ -430,16 +479,7 @@ function interpret(outputs::Vector{Node}, values::Dict{Node, TensorValue}=Dict{N
                 push!(args, get(values, arg, :impossible))
             end
             len = length(args)
-            if len == 0
-                out = op(node.op)
-            elseif len == 1
-                out = op(node.op, args[1])
-            elseif len == 2
-                out = op(node.op, args[1], args[2])
-            else
-                @assert "We have ops with more args now!?"
-            end
-            values[node] = out
+            values[node] = op(node.op, args...)
         end
     end
     [values[output] for output in outputs]
@@ -455,7 +495,7 @@ end
 function sgdOptimizer(loss::Node, variables::Vector{Node}, step_size::Node)
     gradients = grad(loss, variables)
     step_sizes = map(grad -> step_size .* grad, gradients)
-    updates = map(vargrad -> plusequals(vargrad[1], (step_size .* vargrad[2])), zip(variables, gradients))
+    updates = map(vargrad -> plusequals(vargrad[1], (-step_size .* vargrad[2])), zip(variables, gradients))
     noop(updates...)
 end
 
