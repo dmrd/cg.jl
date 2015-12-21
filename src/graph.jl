@@ -17,11 +17,6 @@ typealias TensorValue Union{Real, Array}
 typealias Shape Vector{Int}
 abstract OpType
 
-# IN PROGRESS: REPLACE NODES T
-
-# The lack of mutually recursive types is annoying
-# Use T <: Node and Operation{Tensor} instead
-# TODO: Is there a better way to do this?
 type Node
     op::OpType
     inputs::Vector{Node}
@@ -33,7 +28,6 @@ end
 pred(node::Node) = node.inputs
 succ(node::Node) = node.outputs
 
-# TODO: Make this do a graph copy and precompute important values such as toposort
 immutable Session
     nodes::Vector{Node}  # Parts of graph stored in topological order
     # [x,y,z] => precomputed order to compute nodes to get x,y, and z
@@ -71,7 +65,6 @@ function Node(data::OpType, name::AbstractString="")
 end
 
 function Node(op::OpType, inputs::Vector{Node}, name::AbstractString="")
-    #TODO: Is there a way to combine the var and apply creation? Perhaps an inner constructor?
     newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
     node = Node(op, inputs, Vector{Node}(), newName)
     for i in inputs
@@ -131,7 +124,6 @@ end
 # Specifies a mutable value
 function variable(init::Node, name::AbstractString="")
     # TODO: must have shape specified / be able to infer
-    # TODO: Actually initialize variables once in a session
     Node(Variable(init), name)
 end
 
@@ -203,7 +195,7 @@ function .*(a::Node, b::Node) apply(Mul(), [a, b]) end
 macro register_op(typ, op, narg)
     # TODO: Is there a way to interpolate an expr (like splat) into another expr with $ or similar?
     # For now, use Expr function (for which we can use splat).
-    # Actually think it's pretty clear.
+    # Think it's pretty clear for now
     args, apply_args = gen_args(narg, Node)
     Expr(:function,
          Expr(:call,
