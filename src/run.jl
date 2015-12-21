@@ -25,19 +25,42 @@ end
 
 function numeric_grad(session::Session, target::Node, wrt::Node, eps=0.001)
     arg = session.values[wrt]
-    result = zeros(arg)
-    for i in 1:length(arg)
-        arg[i] += eps
+    isScalar = typeof(arg) <: Real
+    if isScalar
+        session.values[wrt] = arg + eps
         res1 = copy(interpret(session, target))
-        arg[i] -= 2eps
+        session.values[wrt] = arg - eps
         res2 = copy(interpret(session, target))
-        arg[i] += eps
+        session.values[wrt] = arg
         @assert length(res1) == 1
         @assert length(res2) == 1
-        result[i] = (res1[1] - res2[1]) / 2eps
+        result = (res1[1] - res2[1]) / 2eps
+    else
+        result = zero(arg)
+        for i in 1:length(arg)
+            arg[i] += eps
+            res1 = interpret(session, target)
+            arg[i] -= 2eps
+            res2 = interpret(session, target)
+            arg[i] += 2eps
+            @assert length(res1) == 1
+            @assert length(res2) == 1
+            result[i] = (res1[1] - res2[1]) / 2eps
+        end
     end
     result
 end
+
+#############
+# NN layers #
+#############
+
+# C = input_dim, R = output_dim
+# input = Cx1
+# weights = RxC
+# function fully_connected(input::Node, input_dim::Int, output_dim::Int, weightInit, biasInit)
+#     (variable(init) * input) + variable(biasInit)
+# end
 
 ###################
 # Interpret Graph #
