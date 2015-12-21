@@ -1,6 +1,21 @@
 ##################
 # Representation #
 ##################
+import Base.show
+
+function Base.show(io::IO, node::Node)
+    parts = Vector{AbstractString}()
+    push!(parts, "name: $(node.name)")
+    push!(parts, "op: $(node.op)")
+    if length(node.inputs) > 0
+        push!(parts, "inputs: $(join([x.name for x = node.inputs], ", "))")
+    end
+    if length(node.outputs) > 0
+        push!(parts, "outputs: $(join([x.name for x = node.outputs], ", "))")
+    end
+
+  print(io, "Node{$(join(parts, " || "))}")
+end
 
 # Print connected component of node
 function to_dot(G::Graph)

@@ -17,7 +17,7 @@ type Node
     op::OpType
     inputs::Vector{Node}
     outputs::Vector{Node}
-    name::Nullable{AbstractString}
+    name::AbstractString
 end
 
 pred(node::Node) = node.inputs
@@ -25,22 +25,17 @@ succ(node::Node) = node.outputs
 
 # TODO: Actual scoping on naming
 function Node(data::OpType, name::AbstractString="")
-    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
+    newName = length(name) == 0 ? "$(gensym())" : name
     Node(data, Vector{Node}(), Vector{Node}(), newName)
 end
 
 function Node(op::OpType, inputs::Vector{Node}, name::AbstractString="")
-    newName = length(name) == 0 ? Nullable("$(gensym())") : Nullable(name)
+    newName = length(name) == 0 ? "$(gensym())" : name
     node = Node(op, inputs, Vector{Node}(), newName)
     for i in inputs
         push!(i.outputs, node)
     end
     node
-end
-
-function name(n::Node, str::AbstractString)
-    n.name = Nullable(str)
-    n
 end
 
 immutable Graph
@@ -76,8 +71,8 @@ function grad(out::Node, wrt::Vector{Node})
             # Sum up the gradients of all the outputs
             output_grad = foldr((sum, next) -> sum + next, grads)
         end
-        if !isnull(node.name)
-            name(output_grad, "Gin:$(get(node.name))")
+        if length(node.name) > 0
+            output_grad.name = "Gin:$(get(node.name))"
         end
         node_to_grad[node] = output_grad
 
@@ -89,8 +84,8 @@ function grad(out::Node, wrt::Vector{Node})
                 if (!haskey(node_to_grad_vec, input_node))
                     node_to_grad_vec[input_node] = Vector{Node}()
                 end
-                if !isnull(grad.name)
-                    name(output_grad, "Gout:$(get(input_node.name))")
+                if length(grad.name) > 0
+                    output_grad.name = "Gout:$(get(input_node.name))"
                 end
                 push!(node_to_grad_vec[input_node], grad)
             end
