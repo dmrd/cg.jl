@@ -1,9 +1,14 @@
 ####
+# Shape
+####
+# TODO: Shape inference
+typealias Shape Vector{Int}
+
+
+####
 # Operations
 ####
 
-typealias Shape Vector{Int}
-# TODO: Shape inference
 #### TODO: Broadcasting (see ?broadcast)
 # TODO: Does this type hierarchy make any sense?  Think carefully about what's necessary
 # Also whether it needs a hierarchy at all.  Unclear if we make use of it anywhere
@@ -221,9 +226,21 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 # a = scalar, b = 1d array
 @register_impl Fill         2   Base.fill(a, b...)
 @register_impl Zeros        1   zeros(Float, a...)
-@register_impl ZerosLike    1   Base.zeros(a)
+#@register_impl ZerosLike    1   Base.zeros(a)
 @register_impl Ones         1   ones(Float, a...)
-@register_impl OnesLike     1   Base.ones(a)
+function call(op::ZerosLike, a::Real)
+    Base.zero(a)
+end
+function call(op::ZerosLike, a::Array)
+    Base.zeros(a)
+end
+function call(op::OnesLike, a::Real)
+    Base.one(a)
+end
+function call(op::OnesLike, a::Array)
+    Base.ones(a)
+end
+#@register_impl OnesLike     1   Base.ones(a)
 @register_impl Dim          1   collect(Int, size(a))
 
 @register_impl Copy         1   a
@@ -238,8 +255,7 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 # Return scalar for now
 @register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end; 1)
 
-# I seriously need to handle reals - should this be len 1 matrix or a scalar?
-@register_impl Sum          1   [Base.sum(a)]
+@register_impl Sum          1   Base.sum(a)
 
 # Could do in terms of basic ops
 @register_impl Sigmoid      1    (1.0 ./ (1.0 + exp(-a))) 
@@ -266,7 +282,7 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 ################
 
 # Create an optimize op and return 
-function sgdOptimizer(loss::Node, variables::Vector{Node}, step_size::Node)
+function sgd_optimizer(loss::Node, variables::Vector{Node}, step_size::Node)
     gradients = grad(loss, variables)
     step_sizes = map(grad -> step_size .* grad, gradients)
     updates = map(vargrad -> plusequals(vargrad[1], (-step_size .* vargrad[2])), zip(variables, gradients))

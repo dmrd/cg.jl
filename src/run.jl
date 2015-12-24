@@ -13,7 +13,7 @@ immutable Session
 end
 
 # Get order to evaluate the graph in.  Takes nodes from the graph which initialized the session
-function getOrder(session::Session, outputs::Vector{Node})
+function getorder(session::Session, outputs::Vector{Node})
     if !haskey(session.evalOrder, outputs)
         session.evalOrder[outputs] = toposort_on_path(outputs)
     end
@@ -75,7 +75,7 @@ end
 # Return back dictionary representing current state
 # TODO: Will want the ability to provide ops that feed a placeholder variable
 function interpret(session::Session, outputs::Vector{Node})
-    for node in getOrder(session, outputs)
+    for node in getorder(session, outputs)
         # Handle various input types separately from normal
         if isa(node.op, Placeholder)
             # TODO: Not the actual behavior of placeholders - should have a loader of some kind
@@ -97,7 +97,6 @@ function interpret(session::Session, outputs::Vector{Node})
                 @assert haskey(session.values, arg)
                 push!(args, get(session.values, arg, :impossible))
             end
-            len = length(args)
             session.values[node] = node.op(args...)
         end
     end

@@ -56,11 +56,7 @@ end
 
 function tostring(node::Node)
     # TODO - include values for constants
-    if !(isnull(node.name))
-        return "$(get(node.name)): $(typeof(node.op))"
-    else
-        return "$(typeof(node.data))"
-    end
+    return "$(node.name): $(typeof(node.op))"
 end
 
 function tostring(nodes::Vector{Node})

@@ -72,7 +72,7 @@ function grad(out::Node, wrt::Vector{Node})
             output_grad = foldr((sum, next) -> sum + next, grads)
         end
         if length(node.name) > 0
-            output_grad.name = "Gin:$(get(node.name))"
+            output_grad.name = "Gin:$(node.name)"
         end
         node_to_grad[node] = output_grad
 
@@ -85,7 +85,7 @@ function grad(out::Node, wrt::Vector{Node})
                     node_to_grad_vec[input_node] = Vector{Node}()
                 end
                 if length(grad.name) > 0
-                    output_grad.name = "Gout:$(get(input_node.name))"
+                    output_grad.name = "Gout:$(input_node.name)"
                 end
                 push!(node_to_grad_vec[input_node], grad)
             end
@@ -102,10 +102,10 @@ end
 
 # Node hashing for use in deduping computation graphs
 # Hash node itself, then recursively add in hashes of parents
-function hashNode(node::Node)
+function hash_node(node::Node)
     res = UInt64(node.op)
     for input = node.inputs
-        res = hash(hash(input), res)
+        res = hash(hash_node(input), res)
     end
     res
 end
