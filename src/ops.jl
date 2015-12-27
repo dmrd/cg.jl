@@ -59,6 +59,7 @@ function constant(value::TensorValue, name::AbstractString="")
     Node(Constant(value), name)
 end
 
+type RandN <: RandomOp end
 # .+ and + are different, just support + and - for now
 type Add <: ElementWise end
 type Sub <: ElementWise end
@@ -66,6 +67,9 @@ type Mul <: ElementWise end
 type Div <: ElementWise end
 type Neg <: ElementWise end
 type Copy <: ElementWise end
+
+type Exp <: ElementWise end
+type Log <: ElementWise end
 
 type Sigmoid <: Activations end
 type Relu <: Activations end
@@ -78,6 +82,9 @@ type Sum <: OpType end
 type Dim <: OpType end
 type Assign <: OpType end
 type InPlaceAdd <: OpType end
+
+type Mean <: OpType end
+type Sum <: OpType end
 
 
 #############################
@@ -208,17 +215,26 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 @register_op Sub         (-)          2
 @register_op Mul         (.*)         2
 @register_op Div         (./)         2
-@register_op Neg         (-)          1
 @register_op MatMul      (*)          2
 @register_op Transpose   t            1
 @register_op Assign      (.=)         2
-@register_op Sum         sum          1
 @register_op InPlaceAdd  plusequals   2  # += doesn't work
+
+@register_op Neg         (-)          1
+@register_op Exp         exp          1
+@register_op Log         log          1
+
+@register_op Sum         sum          1
+@register_op Sum         sum          2 # Arg 2 = axis
+@register_op Mean        mean         1
+@register_op Mean        mean         2
 
 @register_op Sigmoid     sigmoid      1
 #@register_op Relu        relu         1
 
 #@register_op SoftMax     softmax      1
+
+@register_op RandN       randn      1
 
 ####
 
@@ -249,17 +265,25 @@ end
 @register_impl Sub          2   a .- b
 @register_impl Mul          2   a .* b
 @register_impl Div          2   a ./ b
-@register_impl Neg          1   (-a)
 @register_impl MatMul       2   a * b
 @register_impl Transpose    1   transpose(a)
 # Return scalar for now
 @register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end; 1)
 
+@register_impl Neg          1   (-a)
+@register_impl Exp          1   (exp(a))
+@register_impl Log          1   (log(a))
+
 @register_impl Sum          1   Base.sum(a)
+@register_impl Sum          2   Base.sum(a, b)
+@register_impl Mean         1   Base.mean(a)
+@register_impl Mean         2   Base.mean(a, b)
 
 # Could do in terms of basic ops
 @register_impl Sigmoid      1    (1.0 ./ (1.0 + exp(-a))) 
 #@register_impl Relu         1    max(0, a)
+
+@register_impl RandN         1   Base.randn(a...)
 
 ####
 
@@ -272,10 +296,34 @@ end
 @register_grad Transpose ds
 @register_grad Sigmoid (sigmoid(a) .* (ones_like(a) - sigmoid(a)) .* ds)
 #@register_grad Relu ((a .> zero(a[1])) .* ds)
+# This works properly for both scalars and arrays because the smaller ds will broadcast
 @register_grad Sum ds .* ones_like(a)  # Only true if output is scalar
+@register_grad Sum (ds .* ones_like(a)) (cg.constant(0)) # Axis gradient is undefined. How to indicate?
+
+@register_grad Exp (exp(a) .* ds)
+@register_grad Log (ds ./ a)
 
 # TODO How to treate OnesLike etc. in gradient computations?
 
+
+## TODO: May want to start grouping together like this
+
+type Softmax <: OpType end
+@register_op Softmax softmax 1
+
+###############
+# Complex ops #
+###############
+
+function crossentropy(label::Node, prediction::Node)
+   -sum(label .* log(prediction))
+end
+
+function softmax(node::Node)
+    exped = exp(node)
+    summed = sum(exped)
+    exped ./ summed
+end
 
 ################
 # Optimization #

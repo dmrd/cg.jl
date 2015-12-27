@@ -2,7 +2,7 @@ using cg
 using Base.Test
 
 # Test each operator
-function test_gradients(out::cg.Node)
+function test_gradients(out::cg.Node, shape=[5])
     G = cg.get_graph([out]);
     inputs = filter(x -> isa(x.op, cg.Placeholder), G.nodes)
     inputs = collect(inputs)
@@ -10,12 +10,13 @@ function test_gradients(out::cg.Node)
 
     session = cg.Session(out)
     for input = inputs
-        session.values[input] = [1.0, 1.0, 1.0, 1.0] # Make random?
+        session.values[input] = ones(Float64, shape...) # Make random?
     end
 
     for (input,grad) = zip(inputs, gradients)
-        numeric = cg.numeric_grad(session, out, input, 0.0001)
+        numeric = cg.numeric_grad(session, out, input, 0.00001)
         symbolic = cg.interpret(session, grad)
+        @show session.values[out]
         @show numeric
         @show symbolic
         @test_approx_eq_eps(symbolic, numeric, 0.0001)
@@ -31,6 +32,8 @@ function test_gradients()
     @show test_gradients(sum(i() + i()))
     @show test_gradients(sum(i() - i()))
     @show test_gradients(sum(i() .* i()))
+    @show test_gradients(sum(exp(i())))
+    @show test_gradients(sum(log(i())))
     #@show test_gradients(sum(i() ./ i()))
     @show test_gradients(cg.t(i()) * i())
     @show test_gradients(sum(cg.sigmoid(i())))
@@ -58,5 +61,17 @@ function test_sgd_basics()
     @test_approx_eq_eps target session.values[b] 0.1
 end
 
+# Test that sum gradients work properly
+function test_sum()
+a = cg.placeholder([1])
+b = cg.variable(cg.randn(cg.constant([1,5])))
+c = cg.sum(a, cg.constant(1))
+d = c .* b
+e = sum(d)
+test_gradients(e, [3, 5])
+end
+
+
 test_gradients()
 test_sgd_basics()
+test_sum()
