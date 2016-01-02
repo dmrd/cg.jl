@@ -316,13 +316,18 @@ type Softmax <: OpType end
 ###############
 
 function crossentropy(label::Node, prediction::Node)
-   -sum(label .* log(prediction))
+    lg = log(prediction)
+    result = -sum(label .* log(prediction))
+    group_between([label, prediction], [result], string(gensym(:crossentropy)), include_in=false)
+    result
 end
 
 function softmax(node::Node)
     exped = exp(node)
     summed = sum(exped)
-    exped ./ summed
+    div = exped ./ summed
+    group_nodes([exped, summed, div], string(gensym(:softmax)))
+    div
 end
 
 ################

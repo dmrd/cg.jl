@@ -205,3 +205,16 @@ end
 function get_graph(nodes::Vector{Node})
     Graph(get_connected(Set(nodes)))
 end
+
+
+function group_nodes(nodes::Vector{Node}, group::AbstractString)
+    for node in nodes
+        @show node
+        node.name = string(group, "/", node.name)
+    end
+end
+
+function group_between(inputs::Vector{Node}, outputs::Vector{Node}, group::AbstractString ; include_in=true, include_out=true)
+    set = nodes_on_path(outputs, inputs)
+    group_nodes(collect(set), group)
+end
