@@ -5,7 +5,7 @@ using Base
 importall Base.Operators
 importall Base
 
-typealias Float Float32
+typealias Float Float64
 typealias TensorValue Union{Real, Array}
 
 ###############
@@ -79,7 +79,7 @@ function grad(out::Node, wrt::Vector{Node})
 
         if (length(node.inputs) > 0)
             # If the node has inputs, calculate the gradient w.r.t their outputs along this path
-            input_grads = grad(node.op, output_grad, node.inputs...)
+            input_grads = grad(node.op, node, output_grad, node.inputs...)
             for (input_node, grad) = zip(node.inputs, input_grads)
                 if (!haskey(node_to_grad_vec, input_node))
                     node_to_grad_vec[input_node] = Vector{Node}()
@@ -209,12 +209,17 @@ end
 
 function group_nodes(nodes::Vector{Node}, group::AbstractString)
     for node in nodes
-        @show node
         node.name = string(group, "/", node.name)
     end
 end
 
 function group_between(inputs::Vector{Node}, outputs::Vector{Node}, group::AbstractString ; include_in=true, include_out=true)
     set = nodes_on_path(outputs, inputs)
+    if !include_in
+        set = setdiff(set, Set(inputs))
+    end
+    if !include_out
+        set = setdiff(set, Set(outputs))
+    end
     group_nodes(collect(set), group)
 end

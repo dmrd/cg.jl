@@ -85,6 +85,9 @@ type InPlaceAdd <: OpType end
 
 type Mean <: OpType end
 type Sum <: OpType end
+type Maximum <: OpType end
+
+type Eq <: OpType end
 
 
 #############################
@@ -144,9 +147,10 @@ end
 """
 @register_grad Mul (a .* ds) (b .* ds)
  Expands to
-function grad(op::Mul, ds::Node, a::Node, b::Node)
+function grad(op::Mul, out::Node, ds::Node, a::Node, b::Node)
     [a .* ds, b .* grad_out]
 end
+TODO: Make this take inputs[], outputs[], gradients[] explicitly as lists
 """
 macro register_grad(typ, grads...)
     args, _ = gen_args(length(grads), Node)
@@ -154,6 +158,7 @@ macro register_grad(typ, grads...)
          Expr(:call,
               esc(:grad),
               :(op::$typ),
+              :(out::Node),
               :(ds::Node),
               args...),
          Expr(:vect,
@@ -232,10 +237,14 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 @register_op Sigmoid     sigmoid      1
 #@register_op Relu        relu         1
 
-#@register_op SoftMax     softmax      1
+@register_op SoftMax     softmax      1
 
-@register_op RandN       randn      1
+@register_op RandN       randn        1
 
+@register_op Maximum     maximum      1
+@register_op Maximum     maximum      2
+
+@register_op Eq          eq           2
 ####
 
 @register_impl Constant     0   op.value
@@ -284,13 +293,17 @@ end
 #@register_impl Relu         1    max(0, a)
 
 @register_impl RandN         1   Base.randn(a...)
+@register_impl Eq            2   broadcast(==, a, b)
+
+@register_impl Maximum       1   maximum(a)
+@register_impl Maximum       2   maximum(a, b)
 
 ####
 
 @register_grad Add ds ds
 @register_grad Sub (ds) (-ds)
 @register_grad Mul (b .* ds) (a .* ds)
-@register_grad Div (ds ./ b) (ds .* a)
+@register_grad Div (ds ./ b) (-(ds .* a) ./ (b .* b))
 @register_grad Neg -ds
 @register_grad MatMul (ds * t(b)) (t(a) * ds)
 @register_grad Transpose ds
@@ -303,32 +316,48 @@ end
 @register_grad Exp (exp(a) .* ds)
 @register_grad Log (ds ./ a)
 
+# This is wrong for edge cases
+@register_grad Maximum  (eq(a, out) .* ds)
+@register_grad Maximum  (eq(a, out) .* ds) (b)  # 2nd one should be undefined
+
 # TODO How to treate OnesLike etc. in gradient computations?
-
-
+# TODO: Add actual GradUndefined
 ## TODO: May want to start grouping together like this
 
 type Softmax <: OpType end
-@register_op Softmax softmax 1
+#@register_op Softmax softmax 1
+#@register_impl SoftMax      1   (m = maximum(a, 1); subbed = a .- m; exped = exp(subbed); exped ./ sum(exped, 1))
+#@register_grad SoftMax      1   (a = maximum())
 
 ###############
 # Complex ops #
 ###############
 
 function crossentropy(label::Node, prediction::Node)
-    lg = log(prediction)
     result = -sum(label .* log(prediction))
     group_between([label, prediction], [result], string(gensym(:crossentropy)), include_in=false)
     result
 end
 
 function softmax(node::Node)
-    exped = exp(node)
-    summed = sum(exped)
+    max = maximum(node, constant(1))  # Maximum columnwise
+    exped = exp(node - max)
+    summed = sum(exped, constant(1))
     div = exped ./ summed
-    group_nodes([exped, summed, div], string(gensym(:softmax)))
+    group_between([node], [div], string(gensym(:softmax)), include_in=false)
     div
 end
+
+# TODO: Add some numeric stability optimizations so we don't need this
+function softmax_crossentropy(label::Node, unnorm_prediction::Node)
+    exped = exp(unnorm_prediction)
+    summed = sum(exped, constant(1))
+    lg = unnorm_prediction - log(summed)
+    result = -sum(label .* lg)
+    group_between([label, unnorm_prediction], [result], string(gensym(:softmax_crossentropy)), include_in=false)
+    result
+end
+
 
 ################
 # Optimization #

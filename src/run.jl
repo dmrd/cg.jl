@@ -20,6 +20,27 @@ function getorder(session::Session, outputs::Vector{Node})
     session.evalOrder[outputs]
 end
 
+function by_name(session::Session, name::AbstractString)
+    for node in session.nodes
+        if node.name == name
+            return node
+        end
+    end
+end
+
+function in_name(session::Session, name::AbstractString)
+    res = Vector{Node}()
+    for node in session.nodes
+        if contains(node.name, name)
+            push!(res, node)
+        end
+    end
+    res
+end
+function value(session::Session, name::AbstractString)
+    session.values[by_name(session, name)]
+end
+
 ## TODO: Transform to straight Julia source code
 # Time to learn some metaprogramming!
 
@@ -66,28 +87,33 @@ end
 # Interpret Graph #
 ###################
 
-function interpret(session::Session, output::Node)
-    interpret(session, [output])[1]
+function interpret(session::Session, output::Node ; debug = false)
+    interpret(session, [output], debug=debug)[1]
 end
 
 # Takes dictionary mapping each already set variable to a state
 # Will not overwrite constants/variables which are already present
 # Return back dictionary representing current state
 # TODO: Will want the ability to provide ops that feed a placeholder variable
-function interpret(session::Session, outputs::Vector{Node})
+function interpret(session::Session, outputs::Vector{Node} ; debug = false)
     for node in getorder(session, outputs)
+        debug && print("Evaluating: ")
+        debug && @show node
         # Handle various input types separately from normal
         if isa(node.op, Placeholder)
             # TODO: Not the actual behavior of placeholders - should have a loader of some kind
+            debug && println("Placeholder")
             if !haskey(session.values, node)
                 @assert false && "Every input node must have a value"
             end
         elseif isa(node.op, Variable)
+            debug && println("Variable")
             if !haskey(session.values, node)
                 # lol recursion - could be a bad time later
                 session.values[node] = interpret(session, node.op.init)
             end
         elseif isa(node.op, Constant)
+            debug && println("Constant")
             if !(node in keys(session.values))
                 session.values[node] = node.op.value
             end
@@ -97,6 +123,8 @@ function interpret(session::Session, outputs::Vector{Node})
                 @assert haskey(session.values, arg)
                 push!(args, get(session.values, arg, :impossible))
             end
+            debug && println(node.name)
+            debug && println([size(x) for x in args])
             session.values[node] = node.op(args...)
         end
     end

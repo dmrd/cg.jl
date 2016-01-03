@@ -10,7 +10,7 @@ function test_gradients(out::cg.Node, shape=[5])
 
     session = cg.Session(out)
     for input = inputs
-        session.values[input] = ones(Float64, shape...) # Make random?
+        session.values[input] = 2 * ones(Float64, shape...) # Make random?
     end
 
     for (input,grad) = zip(inputs, gradients)
@@ -34,7 +34,7 @@ function test_gradients()
     @show test_gradients(sum(i() .* i()))
     @show test_gradients(sum(exp(i())))
     @show test_gradients(sum(log(i())))
-    #@show test_gradients(sum(i() ./ i()))
+    @show test_gradients(sum(i() ./ i()))
     @show test_gradients(cg.t(i()) * i())
     @show test_gradients(sum(cg.sigmoid(i())))
     #@show test_gradients(sum(cg.relu(i())))
@@ -50,7 +50,7 @@ function test_sgd_basics()
     e = sum(d)
     values = Dict{cg.Node, cg.TensorValue}()
     optimizer = cg.sgd_optimizer(e, [b], cg.constant(0.001, "step_size"))
-    cg.render(cg.get_graph([b]), "graph.png")
+    #cg.render(cg.get_graph([b]), "graph.png")
     session = cg.Session(optimizer)
     for i = 1:10000
         cg.interpret(session, optimizer)
