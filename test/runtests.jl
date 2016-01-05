@@ -23,21 +23,34 @@ function test_gradients(out::cg.Node, shape=[5])
     end
 end
 
-# WHY do I have to do cg.t but not cg.sum?
-
 function test_gradients()
     i = () -> cg.placeholder([1]) # Shape doesn't matter yet
     @show test_gradients(sum(i()))
-    @show test_gradients(sum(-i()))
+
+    # Scalar ops
     @show test_gradients(sum(i() + i()))
     @show test_gradients(sum(i() - i()))
-    @show test_gradients(sum(i() .* i()))
+    @show test_gradients(sum(i() * i()))
+    @show test_gradients(sum(i() / i()))
+    @show test_gradients(sum(i() ^ i()))
+
+    @show test_gradients(sum(-i()))
+    @show test_gradients(sum(sign(i())))
     @show test_gradients(sum(exp(i())))
     @show test_gradients(sum(log(i())))
-    @show test_gradients(sum(i() ./ i()))
-    @show test_gradients(cg.t(i()) * i())
+    @show test_gradients(sum(sin(i())))
+    @show test_gradients(sum(cos(i())))
+    @show test_gradients(sum(abs(i())))
+
+    # @show test_gradients(sum(max(i(), i())))
+    # @show test_gradients(sum(min(i(), i())))
+
     @show test_gradients(sum(cg.sigmoid(i())))
-    #@show test_gradients(sum(cg.relu(i())))
+
+    # Other ops
+    #@show test_gradients(sum(maximum(i())))
+
+    @show test_gradients(cg.dot(cg.t(i()), i()))
 end
 
 function test_sgd_basics()
@@ -46,7 +59,7 @@ function test_sgd_basics()
     a = cg.constant(target, "a")
     b = cg.variable(cg.constant(zeros(10)), "b") # Parameter to optimize
     c = b - a
-    d = c .* c
+    d = c * c
     e = sum(d)
     values = Dict{cg.Node, cg.TensorValue}()
     optimizer = cg.sgd_optimizer(e, [b], cg.constant(0.001, "step_size"))
@@ -66,7 +79,7 @@ function test_sum()
 a = cg.placeholder([1])
 b = cg.variable(cg.randn(cg.constant([1,5])))
 c = cg.sum(a, cg.constant(1))
-d = c .* b
+d = c * b
 e = sum(d)
 test_gradients(e, [3, 5])
 end

@@ -50,23 +50,21 @@ function numeric_grad(session::Session, target::Node, wrt::Node, eps=0.001)
     if isScalar
         session.values[wrt] = arg + eps
         res1 = copy(interpret(session, target))
-        session.values[wrt] = arg - eps
-        res2 = copy(interpret(session, target))
         session.values[wrt] = arg
+        res2 = copy(interpret(session, target))
         @assert length(res1) == 1
         @assert length(res2) == 1
-        result = (res1[1] - res2[1]) / 2eps
+        result = (res1[1] - res2[1]) / eps
     else
         result = zero(arg)
         for i in 1:length(arg)
             arg[i] += eps
             res1 = interpret(session, target)
-            arg[i] -= 2eps
+            arg[i] -= eps
             res2 = interpret(session, target)
-            arg[i] += 2eps
             @assert length(res1) == 1
             @assert length(res2) == 1
-            result[i] = (res1[1] - res2[1]) / 2eps
+            result[i] = (res1[1] - res2[1]) / eps
         end
     end
     result

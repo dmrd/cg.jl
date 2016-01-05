@@ -60,23 +60,9 @@ function constant(value::TensorValue, name::AbstractString="")
 end
 
 type RandN <: RandomOp end
-# .+ and + are different, just support + and - for now
-type Add <: ElementWise end
-type Sub <: ElementWise end
-type Mul <: ElementWise end
-type Div <: ElementWise end
-type Neg <: ElementWise end
 type Copy <: ElementWise end
 
-type Exp <: ElementWise end
-type Log <: ElementWise end
-
-type Sigmoid <: Activations end
-type Relu <: Activations end
-
-type SoftMax <: OpType end
-
-type MatMul <: OpType end  # Matrix multiply
+type Dot <: OpType end  # Matrix multiply
 type Transpose <: OpType end
 type Sum <: OpType end
 type Dim <: OpType end
@@ -86,9 +72,6 @@ type InPlaceAdd <: OpType end
 type Mean <: OpType end
 type Sum <: OpType end
 type Maximum <: OpType end
-
-type Eq <: OpType end
-
 
 #############################
 # Operation creation macros #
@@ -216,109 +199,73 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 @register_op Shape       shape        1
 @register_op Copy        copy         1
 
-@register_op Add         (+)          2
-@register_op Sub         (-)          2
-@register_op Mul         (.*)         2
-@register_op Div         (./)         2
-@register_op MatMul      (*)          2
+@register_op Dot         dot          2
 @register_op Transpose   t            1
 @register_op Assign      (.=)         2
 @register_op InPlaceAdd  plusequals   2  # += doesn't work
 
-@register_op Neg         (-)          1
-@register_op Exp         exp          1
-@register_op Log         log          1
 
 @register_op Sum         sum          1
 @register_op Sum         sum          2 # Arg 2 = axis
 @register_op Mean        mean         1
 @register_op Mean        mean         2
 
-@register_op Sigmoid     sigmoid      1
 #@register_op Relu        relu         1
 
-@register_op SoftMax     softmax      1
+#@register_op SoftMax     softmax      1
 
 @register_op RandN       randn        1
 
 @register_op Maximum     maximum      1
 @register_op Maximum     maximum      2
-
-@register_op Eq          eq           2
 ####
 
 @register_impl Constant     0   op.value
 # a = scalar, b = 1d array
 @register_impl Fill         2   Base.fill(a, b...)
 @register_impl Zeros        1   zeros(Float, a...)
-#@register_impl ZerosLike    1   Base.zeros(a)
+@register_impl ZerosLike    1   Base.zero(a)
 @register_impl Ones         1   ones(Float, a...)
-function call(op::ZerosLike, a::Real)
-    Base.zero(a)
-end
-function call(op::ZerosLike, a::Array)
-    Base.zeros(a)
-end
+# Why does this not also exist for 1 if it does for 0?  Good question
+#@register_impl OnesLike     1   Base.one(a)
 function call(op::OnesLike, a::Real)
     Base.one(a)
 end
 function call(op::OnesLike, a::Array)
     Base.ones(a)
 end
-#@register_impl OnesLike     1   Base.ones(a)
+
 @register_impl Dim          1   collect(Int, size(a))
 
 @register_impl Copy         1   a
 
-@register_impl Add          2   a .+ b
-@register_impl Sub          2   a .- b
-@register_impl Mul          2   a .* b
-@register_impl Div          2   a ./ b
-@register_impl MatMul       2   a * b
+@register_impl Dot          2   a * b
 @register_impl Transpose    1   transpose(a)
 # Return scalar for now
 @register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end; 1)
-
-@register_impl Neg          1   (-a)
-@register_impl Exp          1   (exp(a))
-@register_impl Log          1   (log(a))
 
 @register_impl Sum          1   Base.sum(a)
 @register_impl Sum          2   Base.sum(a, b)
 @register_impl Mean         1   Base.mean(a)
 @register_impl Mean         2   Base.mean(a, b)
 
-# Could do in terms of basic ops
-@register_impl Sigmoid      1    (1.0 ./ (1.0 + exp(-a))) 
-#@register_impl Relu         1    max(0, a)
-
 @register_impl RandN         1   Base.randn(a...)
-@register_impl Eq            2   broadcast(==, a, b)
 
 @register_impl Maximum       1   maximum(a)
 @register_impl Maximum       2   maximum(a, b)
 
 ####
 
-@register_grad Add ds ds
-@register_grad Sub (ds) (-ds)
-@register_grad Mul (b .* ds) (a .* ds)
-@register_grad Div (ds ./ b) (-(ds .* a) ./ (b .* b))
-@register_grad Neg -ds
-@register_grad MatMul (ds * t(b)) (t(a) * ds)
+@register_grad Dot (ds * t(b)) (t(a) * ds)
 @register_grad Transpose ds
-@register_grad Sigmoid (sigmoid(a) .* (ones_like(a) - sigmoid(a)) .* ds)
-#@register_grad Relu ((a .> zero(a[1])) .* ds)
-# This works properly for both scalars and arrays because the smaller ds will broadcast
-@register_grad Sum ds .* ones_like(a)  # Only true if output is scalar
-@register_grad Sum (ds .* ones_like(a)) (cg.constant(0)) # Axis gradient is undefined. How to indicate?
 
-@register_grad Exp (exp(a) .* ds)
-@register_grad Log (ds ./ a)
+# This works properly for both scalars and arrays because the smaller ds will broadcast
+@register_grad Sum ds * ones_like(a)  # Only true if output is scalar
+@register_grad Sum (ds * ones_like(a)) (cg.constant(0)) # Axis gradient is undefined. How to indicate?
 
 # This is wrong for edge cases
-@register_grad Maximum  (eq(a, out) .* ds)
-@register_grad Maximum  (eq(a, out) .* ds) (b)  # 2nd one should be undefined
+@register_grad Maximum  (eq(a, out) * ds)
+@register_grad Maximum  (eq(a, out) * ds) (b)  # 2nd one should be undefined
 
 # TODO How to treate OnesLike etc. in gradient computations?
 # TODO: Add actual GradUndefined
@@ -329,12 +276,128 @@ type Softmax <: OpType end
 #@register_impl SoftMax      1   (m = maximum(a, 1); subbed = a .- m; exped = exp(subbed); exped ./ sum(exped, 1))
 #@register_grad SoftMax      1   (a = maximum())
 
+###########
+# Scalars #
+###########
+abstract ScalarOp <: OpType
+type Add <: ScalarOp end
+type Sub <: ScalarOp end
+type Mul <: ScalarOp end
+type Div <: ScalarOp end
+type Pow <: ScalarOp end
+
+type Neg <: ScalarOp end
+type Sign <: ScalarOp end
+type Exp <: ScalarOp end
+type Log <: ScalarOp end
+type Sin <: ScalarOp end
+type Cos <: ScalarOp end
+type Abs <: ScalarOp end
+
+type Max <: ScalarOp end
+type Min <: ScalarOp end
+
+type Eq <: ScalarOp end
+type Neq <: ScalarOp end
+type Le <: ScalarOp end
+type Leq <: ScalarOp end
+type Ge <: ScalarOp end
+type Geq <: ScalarOp end
+
+type Sigmoid <: ScalarOp end
+
+@register_op Add         (+)          2
+@register_op Sub         (-)          2
+@register_op Mul         (*)          2
+@register_op Div         (/)          2
+@register_op Pow         (^)          2
+
+@register_op Neg         (-)          1
+@register_op Sign        sign         1
+@register_op Exp         exp          1
+@register_op Log         log          1
+@register_op Sin         sin          1
+@register_op Cos         cos          1
+@register_op Abs         abs          1
+
+@register_op Max         max          2
+@register_op Min         min          2
+
+# Would like to use == etc., but spell out for now
+@register_op Eq          (eq)         2
+@register_op Neq         (neq)        2
+@register_op Le          (le)         2
+@register_op Leq         (leq)        2
+@register_op Ge          (ge)         2
+@register_op Geq         (geq)        2
+
+@register_op Sigmoid     sigmoid      1
+
+call(op::Add,  a::Real, b::Real)  = a + b
+call(op::Sub,  a::Real, b::Real)  = a - b
+call(op::Mul,  a::Real, b::Real)  = a * b
+call(op::Div,  a::Real, b::Real)  = a / b
+call(op::Pow,  a::Real, b::Real)  = a ^ b
+
+call(op::Neg,  a::Real)           = -a
+call(op::Sign, a::Real)           = sign(a)
+call(op::Exp,  a::Real)           = exp(a)
+call(op::Log,  a::Real)           = log(a)
+call(op::Sin,  a::Real)           = sin(a)
+call(op::Cos,  a::Real)           = cos(a)
+call(op::Abs,  a::Real)           = abs(a)
+
+call(op::Max,  a::Real, b::Real)  = max(a,b)
+call(op::Min,  a::Real, b::Real)  = min(a,b)
+
+call(op::Eq,   a::Real, b::Real)  = a == b
+call(op::Neq,  a::Real, b::Real)  = a != b
+call(op::Le,   a::Real, b::Real)  = a < b
+call(op::Leq,  a::Real, b::Real)  = a <= b
+call(op::Ge,   a::Real, b::Real)  = a > b
+call(op::Geq,  a::Real, b::Real)  = a >= b
+
+call(op::Sigmoid, a::Real) = (1.0 ./ (1.0 + exp(-a))) 
+
+
+@register_grad Add ds ds
+@register_grad Sub (ds) (-ds)
+@register_grad Mul (b * ds) (a * ds)
+@register_grad Div (ds / b) (-(ds * a) / (b * b))
+@register_grad Pow (ds * b * a ^ (b - cg.constant(1.0))) (ds * log(a) * (a ^ b))
+# TODO: make the constants the proper type
+
+@register_grad Sign zeros_like(a)
+@register_grad Neg (-ds)
+@register_grad Exp (exp(a) * ds)
+@register_grad Log (ds / a)
+@register_grad Sin (cos(a) * ds)
+@register_grad Cos (-sin(a) * ds)
+@register_grad Abs (sign(a) * ds)
+
+# @register_grad Max (eq(out, a) * ds) (eq(out, b))
+# @register_grad Min (eq(out, a) * ds) (eq(out, b))
+
+@register_grad Max (ge(a, b) * ds) (le(a, b) * ds)
+@register_grad Min (le(a, b) * ds) (ge(a, b) * ds)
+
+@register_grad Sigmoid (sigmoid(a) * (cg.constant(1.0) - sigmoid(a)) * ds)
+
+################
+# Broadcasting #
+################
+# Simplify ops to always assume broadcasting
+
+call{T <: ScalarOp}(op::T, arrs::AbstractArray...) = broadcast(op, arrs...)
+call{T <: ScalarOp}(op::T, a::AbstractArray, b::Real) = broadcast(op, a, b)
+call{T <: ScalarOp}(op::T, a::Real, b::AbstractArray) = broadcast(op, a, b)
+
 ###############
 # Complex ops #
 ###############
 
 function crossentropy(label::Node, prediction::Node)
-    result = -sum(label .* log(prediction))
+    result = -sum(label * log(prediction))
     group_between([label, prediction], [result], string(gensym(:crossentropy)), include_in=false)
     result
 end
@@ -343,19 +406,26 @@ function softmax(node::Node)
     max = maximum(node, constant(1))  # Maximum columnwise
     exped = exp(node - max)
     summed = sum(exped, constant(1))
-    div = exped ./ summed
+    div = exped / summed
     group_between([node], [div], string(gensym(:softmax)), include_in=false)
     div
 end
 
 # TODO: Add some numeric stability optimizations so we don't need this
 function softmax_crossentropy(label::Node, unnorm_prediction::Node)
-    exped = exp(unnorm_prediction)
+    max = maximum(unnorm_prediction)
+    exped = exp(unnorm_prediction - max)
     summed = sum(exped, constant(1))
     lg = unnorm_prediction - log(summed)
-    result = -sum(label .* lg)
+    result = -sum(label * lg)
     group_between([label, unnorm_prediction], [result], string(gensym(:softmax_crossentropy)), include_in=false)
     result
+end
+
+function mean_squared_error(a::Node, b::Node)
+    diff = a - b
+    sq = diff .* diff
+    mean(sq)
 end
 
 
@@ -366,7 +436,7 @@ end
 # Create an optimize op and return 
 function sgd_optimizer(loss::Node, variables::Vector{Node}, step_size::Node)
     gradients = grad(loss, variables)
-    step_sizes = map(grad -> step_size .* grad, gradients)
-    updates = map(vargrad -> plusequals(vargrad[1], (-step_size .* vargrad[2])), zip(variables, gradients))
+    step_sizes = map(grad -> step_size * grad, gradients)
+    updates = map(vargrad -> plusequals(vargrad[1], (-step_size * vargrad[2])), zip(variables, gradients))
     noop(updates...)
 end
