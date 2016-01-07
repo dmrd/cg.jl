@@ -2,55 +2,85 @@ using cg
 using Base.Test
 
 # Test each operator
-function test_gradients(out::cg.Node, shape=[5])
+function test_gradients(out::cg.Node, shape=[5] ; filltype::Symbol=:range, iters=1, debug=false)
     G = cg.get_graph([out]);
     inputs = filter(x -> isa(x.op, cg.Placeholder), G.nodes)
     inputs = collect(inputs)
     gradients = cg.grad(out, inputs)
 
     session = cg.Session(out)
-    for input = inputs
-        session.values[input] = 2 * ones(Float64, shape...) # Make random?
-    end
+    for iter = 1:iters
+        for (i,input) = enumerate(inputs)
+            if filltype == :range
+                # val[j] = i + j
+                session.values[input] = reshape(collect(Float64, 1:(*(shape...))), shape...) + i
+            elseif filltype == :rand
+                session.values[input] = rand(shape...) - 0.5
+            elseif filltype == :ones
+                session.values[input] = ones(shape...)
+            else
+                @assert false && "invalid filltype"
+            end
+        end
 
-    for (input,grad) = zip(inputs, gradients)
-        numeric = cg.numeric_grad(session, out, input, 0.00001)
-        symbolic = cg.interpret(session, grad)
-        @show session.values[out]
-        @show numeric
-        @show symbolic
-        @test_approx_eq_eps(symbolic, numeric, 0.0001)
+        for (input,grad) = zip(inputs, gradients)
+            numeric = cg.numeric_grad(session, out, input, 0.0000001)
+            symbolic = cg.interpret(session, grad)
+            if debug
+                @show session.values[input]
+                @show session.values[out]
+                @show numeric
+                @show symbolic
+            end
+            for i = 1:length(symbolic)
+                @test_approx_eq_eps(symbolic[i], numeric[i], 0.0001)
+            end
+        end
     end
 end
 
 function test_gradients()
     i = () -> cg.placeholder([1]) # Shape doesn't matter yet
-    @show test_gradients(sum(i()))
+    @show @time test_gradients(sum(i()))
 
     # Scalar ops
-    @show test_gradients(sum(i() + i()))
-    @show test_gradients(sum(i() - i()))
-    @show test_gradients(sum(i() * i()))
-    @show test_gradients(sum(i() / i()))
-    @show test_gradients(sum(i() ^ i()))
+    @show @time test_gradients(sum(i() + i()))
+    @show @time test_gradients(sum(i() - i()))
+    @show @time test_gradients(sum(i() * i()))
+    @show @time test_gradients(sum(i() / i()))
+    @show @time test_gradients(sum(i() ^ cg.constant(3.0)))
+    @show @time test_gradients(sum(cg.constant(3.0) ^ i()))
 
-    @show test_gradients(sum(-i()))
-    @show test_gradients(sum(sign(i())))
-    @show test_gradients(sum(exp(i())))
-    @show test_gradients(sum(log(i())))
-    @show test_gradients(sum(sin(i())))
-    @show test_gradients(sum(cos(i())))
-    @show test_gradients(sum(abs(i())))
+    @show @time test_gradients(sum(-i()))
+    @show @time test_gradients(sum(sign(i())))
+    @show @time test_gradients(sum(sign(i())), filltype=:rand, iters=100)
+    @show @time test_gradients(sum(exp(i())))
+    @show @time test_gradients(sum(log(i())))
+    @show @time test_gradients(sum(sin(i())))
+    @show @time test_gradients(sum(cos(i())))
+    @show @time test_gradients(sum(abs(i())))
 
-    # @show test_gradients(sum(max(i(), i())))
-    # @show test_gradients(sum(min(i(), i())))
+    @show @time test_gradients(sum(max(i(), i())))
+    # Leave this and min() one out for now - what's the
+    # intended behavior when equal?
+    #@show @time test_gradients(sum(max(i(), i())), filltype=:ones)
+    @show @time test_gradients(sum(max(i(), i())), filltype=:rand, iters=100)
 
-    @show test_gradients(sum(cg.sigmoid(i())))
+    @show @time test_gradients(sum(min(i(), i())))
+    #@show @time test_gradients(sum(min(i(), i())), filltype=:ones)
+    @show @time test_gradients(sum(min(i(), i())), filltype=:rand, iters=100)
+
+    @show @time test_gradients(sum(cg.sigmoid(i())))
 
     # Other ops
-    #@show test_gradients(sum(maximum(i())))
+    @show @time test_gradients(sum(maximum(i())))
+    @show @time test_gradients(sum(maximum(i())), filltype=:ones)
+    @show @time test_gradients(sum(maximum(i())), filltype=:rand, iters=100)
+    @show @time test_gradients(sum(maximum(i(), cg.constant(1))), [10,15], filltype=:rand, iters=100)
+    @show @time test_gradients(sum(maximum(i(), cg.constant(2))), [10,15], filltype=:rand, iters=100)
 
-    @show test_gradients(cg.dot(cg.t(i()), i()))
+    # Mat mul
+    @show @time test_gradients(cg.dot(cg.t(i()), i()))
 end
 
 function test_sgd_basics()
@@ -76,12 +106,12 @@ end
 
 # Test that sum gradients work properly
 function test_sum()
-a = cg.placeholder([1])
-b = cg.variable(cg.randn(cg.constant([1,5])))
-c = cg.sum(a, cg.constant(1))
-d = c * b
-e = sum(d)
-test_gradients(e, [3, 5])
+    a = cg.placeholder([1])
+    b = cg.variable(cg.randn(cg.constant([1,5])))
+    c = cg.sum(a, cg.constant(1))
+    d = c * b
+    e = sum(d)
+    test_gradients(e, [3, 5])
 end
 
 

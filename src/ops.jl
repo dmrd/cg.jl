@@ -375,11 +375,8 @@ call(op::Sigmoid, a::Real) = (1.0 ./ (1.0 + exp(-a)))
 @register_grad Cos (-sin(a) * ds)
 @register_grad Abs (sign(a) * ds)
 
-# @register_grad Max (eq(out, a) * ds) (eq(out, b))
-# @register_grad Min (eq(out, a) * ds) (eq(out, b))
-
-@register_grad Max (ge(a, b) * ds) (le(a, b) * ds)
-@register_grad Min (le(a, b) * ds) (ge(a, b) * ds)
+@register_grad Max (eq(out, a) * ds) (eq(out, b))
+@register_grad Min (eq(out, a) * ds) (eq(out, b))
 
 @register_grad Sigmoid (sigmoid(a) * (cg.constant(1.0) - sigmoid(a)) * ds)
 
@@ -388,6 +385,7 @@ call(op::Sigmoid, a::Real) = (1.0 ./ (1.0 + exp(-a)))
 ################
 # Simplify ops to always assume broadcasting
 
+#TODO question: Is {T <: ScalarOp}(op::T) more efficient than op::ScalarOp?  Look at codegen
 call{T <: ScalarOp}(op::T, arrs::AbstractArray...) = broadcast(op, arrs...)
 call{T <: ScalarOp}(op::T, a::AbstractArray, b::Real) = broadcast(op, a, b)
 call{T <: ScalarOp}(op::T, a::Real, b::AbstractArray) = broadcast(op, a, b)

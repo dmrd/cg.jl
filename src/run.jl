@@ -58,10 +58,12 @@ function numeric_grad(session::Session, target::Node, wrt::Node, eps=0.001)
     else
         result = zero(arg)
         for i in 1:length(arg)
+            orig = arg[i]
             arg[i] += eps
             res1 = interpret(session, target)
             arg[i] -= eps
             res2 = interpret(session, target)
+            arg[i] = orig # Prevent floating point errors
             @assert length(res1) == 1
             @assert length(res2) == 1
             result[i] = (res1[1] - res2[1]) / eps
