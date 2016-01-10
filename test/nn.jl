@@ -72,3 +72,5 @@ function train_loss()
     sess.values[label] = onehot(train[2])
     cg.interpret(sess, loss)
 end
+
+labels = onehot(testdata()[2])

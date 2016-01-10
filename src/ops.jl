@@ -4,7 +4,6 @@
 # TODO: Shape inference
 typealias Shape Vector{Int}
 
-
 ####
 # Operations
 ####
@@ -72,6 +71,11 @@ type InPlaceAdd <: OpType end
 type Mean <: OpType end
 type Sum <: OpType end
 type Maximum <: OpType end
+type RepeatTo <: OpType end
+
+# These are mainly for testing
+type GetIndex <: OpType end
+type SetIndex <: OpType end
 
 #############################
 # Operation creation macros #
@@ -102,7 +106,7 @@ end
 """
 @register_op  Mul (.*) 2
 Expands to
-function .*(a::Node, b::Node) apply(Mul(), [a, b]) end
+function .*(a::Node, b::Node) Node(Mul(), [a, b]) end
 """
 macro register_op(typ, op, narg)
     # TODO: Is there a way to interpolate an expr (like splat) into another expr with $ or similar?
@@ -190,7 +194,7 @@ end
 
 # Wrapper on fill
 fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
-
+@register_op Dim         dim          1
 @register_op Zeros       zeros        1
 @register_op ZerosLike   zeros_like   1
 @register_op Ones        ones         1
@@ -218,6 +222,11 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 
 @register_op Maximum     maximum      1
 @register_op Maximum     maximum      2
+
+@register_op GetIndex    getindex     2
+@register_op SetIndex    setindex     3
+
+@register_op RepeatTo    repeatto     2 # input array, target shp - expand singleton dims
 ####
 
 @register_impl Constant     0   op.value
@@ -254,18 +263,55 @@ end
 @register_impl Maximum       1   maximum(a)
 @register_impl Maximum       2   maximum(a, b)
 
+@register_impl GetIndex      2   (a[b])
+@register_impl SetIndex      3   (t = copy(a); t[b] = c; t)
+
+
+function call(op::RepeatTo, a::Real, dim::Array)
+    fill(a, dim...)
+end
+
+# Repeats singleton dimensions of the given array to given dimensions
+function call(op::RepeatTo, a::Array, dim::Array)
+    cdim = size(a)
+    ncurdim = length(cdim)
+    @assert length(size(dim)) == 1  # Is a vector
+    @assert length(dim) >= length(cdim)  # target has at least as many dimensions
+    repcount = zeros(dim)
+    for i = 1:length(dim)
+        if i > ncurdim
+            # Expand all implicitly 1 dimensions
+            repcount[i] = dim[i]
+        elseif cdim[i] == 1
+            # Expand all singleton dims
+            repcount[i] = dim[i]
+        elseif cdim[i] == dim[i]
+            # Leave rest the same
+            repcount[i] = 1
+        else
+            # All all nonsingleton dimensions must be the same
+            @assert false
+        end
+    end
+    repeat(a, inner=repcount)
+end
+
 ####
 
 @register_grad Dot (ds * t(b)) (t(a) * ds)
 @register_grad Transpose ds
 
-# This works properly for both scalars and arrays because the smaller ds will broadcast
-@register_grad Sum ds * ones_like(a)  # Only true if output is scalar
-@register_grad Sum (ds * ones_like(a)) (cg.constant(0)) # Axis gradient is undefined. How to indicate?
+@register_grad Sum repeatto(ds, dim(a))
+@register_grad Sum repeatto(ds, shape(a)) (cg.constant(0)) # TODO: make axis nondiff
 
 # This is wrong for edge cases
 @register_grad Maximum  (eq(a, out) * ds)
 @register_grad Maximum  (eq(a, out) * ds) (b)  # 2nd one should be undefined
+
+# Incredibly inefficient, but mostly for testing
+# TODO: 0s Replace with nondiff
+@register_grad GetIndex  (t = zeros_like(a); setindex(t, b, ds)) (cg.constant(0))
+@register_grad SetIndex  (setindex(ds, b, cg.constant(0.0))) (cg.constant(0)) (getindex(ds, b))
 
 # TODO How to treate OnesLike etc. in gradient computations?
 # TODO: Add actual GradUndefined
@@ -333,22 +379,22 @@ type Sigmoid <: ScalarOp end
 
 @register_op Sigmoid     sigmoid      1
 
-call(op::Add,  a::Real, b::Real)  = a + b
-call(op::Sub,  a::Real, b::Real)  = a - b
-call(op::Mul,  a::Real, b::Real)  = a * b
-call(op::Div,  a::Real, b::Real)  = a / b
-call(op::Pow,  a::Real, b::Real)  = a ^ b
+call(op::Add,  a::TensorValue, b::TensorValue)  = a + b
+call(op::Sub,  a::TensorValue, b::TensorValue)  = a - b
+call(op::Mul,  a::TensorValue, b::TensorValue)  = a * b
+call(op::Div,  a::TensorValue, b::TensorValue)  = a / b
+call(op::Pow,  a::TensorValue, b::TensorValue)  = a ^ b
 
-call(op::Neg,  a::Real)           = -a
-call(op::Sign, a::Real)           = sign(a)
-call(op::Exp,  a::Real)           = exp(a)
-call(op::Log,  a::Real)           = log(a)
-call(op::Sin,  a::Real)           = sin(a)
-call(op::Cos,  a::Real)           = cos(a)
-call(op::Abs,  a::Real)           = abs(a)
+call(op::Neg,  a::TensorValue)           = -a
+call(op::Sign, a::TensorValue)           = sign(a)
+call(op::Exp,  a::TensorValue)           = exp(a)
+call(op::Log,  a::TensorValue)           = log(a)
+call(op::Sin,  a::TensorValue)           = sin(a)
+call(op::Cos,  a::TensorValue)           = cos(a)
+call(op::Abs,  a::TensorValue)           = abs(a)
 
-call(op::Max,  a::Real, b::Real)  = max(a,b)
-call(op::Min,  a::Real, b::Real)  = min(a,b)
+call(op::Max,  a::TensorValue, b::TensorValue)  = max(a,b)
+call(op::Min,  a::TensorValue, b::TensorValue)  = min(a,b)
 
 call(op::Eq,   a::Real, b::Real)  = a == b
 call(op::Neq,  a::Real, b::Real)  = a != b
@@ -356,6 +402,15 @@ call(op::Le,   a::Real, b::Real)  = a < b
 call(op::Leq,  a::Real, b::Real)  = a <= b
 call(op::Ge,   a::Real, b::Real)  = a > b
 call(op::Geq,  a::Real, b::Real)  = a >= b
+
+
+# Eh... This doesn't require equal dimensions.  implicit broadcasting is eh
+call(op::Eq,   a::TensorValue, b::TensorValue)  = a .== b
+call(op::Neq,  a::TensorValue, b::TensorValue)  = a .!= b
+call(op::Le,   a::TensorValue, b::TensorValue)  = a .< b
+call(op::Leq,  a::TensorValue, b::TensorValue)  = a .<= b
+call(op::Ge,   a::TensorValue, b::TensorValue)  = a .> b
+call(op::Geq,  a::TensorValue, b::TensorValue)  = a .>= b
 
 call(op::Sigmoid, a::Real) = (1.0 ./ (1.0 + exp(-a))) 
 
@@ -383,26 +438,85 @@ call(op::Sigmoid, a::Real) = (1.0 ./ (1.0 + exp(-a)))
 ################
 # Broadcasting #
 ################
+# Some way to specialize {T <: ScalarOp}?
+type Broadcast <: OpType
+    op::ScalarOp
+end
+type BroadcastGrad <: OpType end
+
+function broadcastop(op::ScalarOp, a::Node, b::Node)
+    Node(Broadcast(op), [a, b])
+end
+@register_impl Broadcast 2 broadcast(op.op, a, b)
+@register_grad Broadcast broadcastgrad(ds, a) broadcastgrad(ds, b)
+
+# TODO: This is a hack and I don't like it
+# In place until shape inference exists?
+# args: [out, arg to go back to]
+# Alternative is some explicit copying
+@register_op BroadcastGrad broadcastgrad 2
+
+# What axes to sum to get from cur_dim to target
+function get_sum_dims(curdim::Vector{Int}, targetdim::Vector{Int})
+    dims = Vector{Int64}()
+    nt = length(targetdim)
+    nc = length(curdim)
+    for dim = 1:nt
+        if targetdim[dim] == 1
+            push!(dims, dim)
+        end
+    end
+    if nc < nt
+        for dim = (nc + 1):nt
+            push!(dims)
+        end
+    end
+    dims
+end
+
+function _sum(a::AbstractArray, dims::Int...)
+    length(dims) == 0 ? sum(a) : sum(a, dims)
+end
+
+# Sum axes of "from" to match dimensions of "to"
+function call(op::BroadcastGrad, from::TensorValue, to::TensorValue)
+    fshape = size(from)
+    tshape = size(to)
+    println(fshape)
+    println(tshape)
+    if length(tshape) == 0
+        return sum(from)
+    else
+        dims = get_sum_dims(collect(fshape), collect(tshape))
+        println(dims)
+        return sum(from, dims)
+    end
+end
+
+
 # Simplify ops to always assume broadcasting
 
+# TODO: This actually makes gradients difficult in some cases (e.g. sum)
 #TODO question: Is {T <: ScalarOp}(op::T) more efficient than op::ScalarOp?  Look at codegen
-call{T <: ScalarOp}(op::T, arrs::AbstractArray...) = broadcast(op, arrs...)
-call{T <: ScalarOp}(op::T, a::AbstractArray, b::Real) = broadcast(op, a, b)
-call{T <: ScalarOp}(op::T, a::Real, b::AbstractArray) = broadcast(op, a, b)
+#TODO Just calling sin(x) is faster than broadcast(sin, x) by many times.  Do this instead for most ops
+# call{T <: ScalarOp}(op::T, arrs::AbstractArray...) = broadcast(op, arrs...)
+# call{T <: ScalarOp}(op::T, a::AbstractArray, b::Real) = broadcast(op, a, b)
+# call{T <: ScalarOp}(op::T, a::Real, b::AbstractArray) = broadcast(op, a, b)
 
 ###############
 # Complex ops #
 ###############
 
 function crossentropy(label::Node, prediction::Node)
-    result = -sum(label * log(prediction))
+    result = -sum(label * log(prediction), cg.constant(1))
     group_between([label, prediction], [result], string(gensym(:crossentropy)), include_in=false)
     result
 end
 
 function softmax(node::Node)
-    max = maximum(node, constant(1))  # Maximum columnwise
-    exped = exp(node - max)
+    # max = maximum(node, constant(1))  # Maximum columnwise
+    # exped = exp(node - max)
+    exped = exp(node)
     summed = sum(exped, constant(1))
     div = exped / summed
     group_between([node], [div], string(gensym(:softmax)), include_in=false)

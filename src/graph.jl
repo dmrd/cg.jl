@@ -2,7 +2,6 @@
 # Defines the core Node and operations on the graph
 
 using Base
-importall Base.Operators
 importall Base
 
 typealias Float Float64

@@ -100,7 +100,6 @@ end
 function render(G::Graph, outfile::AbstractString; group_nodes=false)
     dotstr = to_dot(G, group_nodes=group_nodes)
     dotcmd = `dot -Tpng -o $(outfile)`
-    println(dotstr)
     run(pipeline(`echo $(dotstr)`, dotcmd))
 end
 
