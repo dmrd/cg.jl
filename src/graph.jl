@@ -54,7 +54,7 @@ function grad(out::Node, wrt::Vector{Node})
     # output gradient = derivative w.r.t. output (i.e. before we apply this node's grad)
 
     # When we process a node, associate its input gradient with the appropriate input
-    node_to_grad_vec = Dict{Node, Vector{Node}}(out => [ones_like(out)])
+    node_to_grad_vec = Dict{Node, Vector{Node}}(out => [fill_like(cg.constant(1.0), out)])
 
     # Map a node to its single output (usually sum of all output gradients)
     node_to_grad = Dict{Node, Node}()

@@ -2,7 +2,7 @@ using cg
 using Base.Test
 using Base
 
-show_test(test::AbstractString) = println("== Running tests $test ==")
+show_test(test::AbstractString) = println("==============\n Running tests $test\n==============")
 i = () -> cg.placeholder([1]) # Shape doesn't matter yet
 c = cg.constant
 
@@ -50,6 +50,7 @@ function test_gradients(out::cg.Node, shape=[5] ; filltype::Symbol=:range, iters
 
         for (input,grad) = zip(inputs, gradients)
             numeric = cg.numeric_grad(session, out, input, 0.0000001)
+            #numeric = cg.numeric_grad(session, out, input, 1.0)
             symbolic = cg.interpret(session, grad)
             if debug
                 @show session.values[input]
@@ -57,9 +58,10 @@ function test_gradients(out::cg.Node, shape=[5] ; filltype::Symbol=:range, iters
                 @show numeric
                 @show symbolic
             end
-            for i = 1:length(symbolic)
-                @test_approx_eq_eps(symbolic[i], numeric[i], 0.0001)
-            end
+            @test_approx_eq_eps(symbolic, numeric, 0.0001)
+            # for i = 1:length(symbolic)
+            #     @test_approx_eq_eps(symbolic[i], numeric[i], 0.0001)
+            # end
         end
     end
 end
@@ -72,9 +74,9 @@ function test_scalar_gradients()
     # Scalar ops
     @show test_gradients(sum(i() + i()))
     @show test_gradients(sum(i() - i()))
-    @show test_gradients(sum(i() * i()))
+    @show test_gradients(sum(i() * i()), debug=true)
     @show test_gradients(sum(i() / i()))
-    @show test_gradients(sum(i() ^ cg.constant(3.0)))
+    @show test_gradients(sum(i() ^ cg.constant(3.0)), debug=true)
     @show test_gradients(sum(cg.constant(3.0) ^ i()))
 
     @show test_gradients(sum(-i()))
@@ -163,10 +165,26 @@ function test_nn()
         @show test_output(crossentropy, crossentropy_t, (ci1, a1), (ci2, a2))
         @show test_output(softmax_crossentropy, softmax_crossentropy_t, (sci1, a1), (sci2, a2))
 
+        println("GRADIENTS ============")
+        # Underflow makes me sad =(
 
-        @show test_gradients(cg.sum(softmax), debug=true)
+        #@show test_gradients(cg.sum(broadcast("/", si1, sum(si1, cg.constant(1)))))
+        #@show test_output(print(cg.sum(broadcast("/", si1, sum(si1)))), x -> sum(x / sum(x)), (si1, a1))
+
+        #@show test_gradients(cg.sum(broadcast("/", si1, sum(si1))))
+        @show test_gradients(cg.getindex(si1, cg.constant(1)))
+        @show test_gradients(sum(si1))
+        scal1 = i()
+        scal2 = i()
+        @show test_gradients(print(scal1 / (scal1 + scal2)), [1], debug=true)
+        @show test_gradients(cg.getindex(broadcast("/", si1, sum(si1)), cg.constant(1)), [2], debug=true)
+
+        @show test_gradients(cg.sum(softmax))
+        println("B ============")
         @show test_gradients(cg.sum(crossentropy))
+        println("C ============")
         @show test_gradients(cg.sum(softmax_crossentropy))
+        println("d ============")
     end
 end
 
@@ -204,11 +222,11 @@ function test_sum()
 end
 
 
-#test_broadcast()
-#test_shape_gradients()
-test_scalar_gradients()
-test_other_gradients()
 test_nn()
+test_scalar_gradients()
+test_broadcast()
+test_shape_gradients()
+test_other_gradients()
 test_get_and_set_gradients()
 test_sgd_basics()
 test_sum()

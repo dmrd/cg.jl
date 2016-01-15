@@ -125,11 +125,15 @@ function interpret(session::Session, outputs::Vector{Node} ; debug = false)
             end
             debug && println(node.name)
             debug && println([size(x) for x in args])
-            @show node
-            @show node.op
-            @show args
+            if debug
+                @show node
+                @show node.op
+                @show args
+            end
             out = node.op(args...)
-            @show out
+            if debug
+                @show out
+            end
             session.values[node] = out
         end
     end

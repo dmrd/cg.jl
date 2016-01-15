@@ -8,7 +8,6 @@ typealias Shape Vector{Int}
 # Operations
 ####
 
-#### TODO: Broadcasting (see ?broadcast)
 # TODO: Does this type hierarchy make any sense?  Think carefully about what's necessary
 # Also whether it needs a hierarchy at all.  Unclear if we make use of it anywhere
 # Additionally, can these be defined together with other parts of command?
@@ -21,13 +20,11 @@ abstract ElementWise <: OpType
 abstract Activations <: ElementWise
 
 # TODO: How to do control edges / grouping
+immutable Print <: OpType end
 immutable Noop <: OpType end
 
-immutable Zeros <: ConstantOp end
-immutable ZerosLike <: ConstantOp end
-immutable Ones <: ConstantOp end
-immutable OnesLike <: ConstantOp end
 immutable Fill <: ConstantOp end
+immutable FillLike <: ConstantOp end
 
 # Values provided as input
 immutable Placeholder <: VarOp
@@ -169,6 +166,26 @@ macro register_impl(typ, narg, impl)
          impl)
 end
 
+"""
+@register_shape Mul 3 (a + b)
+Expands to
+function shape(op::Mul, a::Shape, b::Shape)
+    # Check compatability
+    ...
+    # Return new result
+    a + b
+end
+"""
+macro register_shape(typ, narg, impl)
+    args, _ = gen_args(narg, Shape)
+    Expr(:function,
+         Expr(:call,
+              esc(:shape),
+              :(op::$typ),
+              args...),
+         impl)
+end
+
 #########################
 # Operation Definitions #
 #########################
@@ -194,13 +211,10 @@ end
 
 # Wrapper on fill
 fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val), constant(shape))
+@register_op Print       print        1
 @register_op Dim         dim          1
-@register_op Zeros       zeros        1
-@register_op ZerosLike   zeros_like   1
-@register_op Ones        ones         1
-@register_op OnesLike    ones_like    1
 @register_op Fill        fill         2
-@register_op Shape       shape        1
+@register_op FillLike    fill_like    2
 @register_op Copy        copy         1
 
 @register_op Dot         dot          2
@@ -227,22 +241,15 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 @register_op SetIndex    setindex     3
 
 @register_op RepeatTo    repeatto     2 # input array, target shp - expand singleton dims
-####
 
+################################
+
+@register_impl Print        1   (println(a); a)
 @register_impl Constant     0   op.value
-# a = scalar, b = 1d array
+# a = scalar, b = 1d array specifying dims
 @register_impl Fill         2   Base.fill(a, b...)
-@register_impl Zeros        1   zeros(Float, a...)
-@register_impl ZerosLike    1   Base.zero(a)
-@register_impl Ones         1   ones(Float, a...)
-# Why does this not also exist for 1 if it does for 0?  Good question
-#@register_impl OnesLike     1   Base.one(a)
-function call(op::OnesLike, a::Real)
-    Base.one(a)
-end
-function call(op::OnesLike, a::Array)
-    Base.ones(a)
-end
+# a = scalar, b = array shape to copy
+@register_impl FillLike     2   (dim = size(b); length(dim) == 0 ? a : fill(a, dim...))
 
 @register_impl Dim          1   collect(Int, size(a))
 
@@ -250,8 +257,8 @@ end
 
 @register_impl Dot          2   a * b
 @register_impl Transpose    1   transpose(a)
-# Return scalar for now
-@register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end; 1)
+# TODO: Run without returning anything.  Explicit NoValue
+@register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end; 0)
 
 @register_impl Sum          1   Base.sum(a)
 @register_impl Sum          2   Base.sum(a, b)
@@ -296,21 +303,22 @@ function call(op::RepeatTo, a::Array, dim::Array)
     repeat(a, inner=repcount)
 end
 
-####
+################################
 
-@register_grad Dot (ds * t(b)) (t(a) * ds)
+@register_grad Print ds
+@register_grad Dot broadcast("*", ds, t(b)) broadcast("*", t(a), ds)
 @register_grad Transpose ds
 
 @register_grad Sum repeatto(ds, dim(a))
-@register_grad Sum repeatto(ds, shape(a)) (cg.constant(0)) # TODO: make axis nondiff
+@register_grad Sum repeatto(ds, dim(a)) (cg.constant(0)) # TODO: make axis nondiff
 
 # This is wrong for edge cases
 @register_grad Maximum  (eq(a, out) * ds)
-@register_grad Maximum  (eq(a, out) * ds) (b)  # 2nd one should be undefined
+@register_grad Maximum  broadcast(Mul(), broadcast(Eq(), a, out), ds) (b)  # 2nd one should be undefined
 
 # Incredibly inefficient, but mostly for testing
 # TODO: 0s Replace with nondiff
-@register_grad GetIndex  (t = zeros_like(a); setindex(t, b, ds)) (cg.constant(0))
+@register_grad GetIndex  (t = fill(cg.constant(0.0), dim(a)); setindex(t, b, ds)) (cg.constant(0))
 @register_grad SetIndex  (setindex(ds, b, cg.constant(0.0))) (cg.constant(0)) (getindex(ds, b))
 
 # TODO How to treate OnesLike etc. in gradient computations?
@@ -322,10 +330,14 @@ type Softmax <: OpType end
 #@register_impl SoftMax      1   (m = maximum(a, 1); subbed = a .- m; exped = exp(subbed); exped ./ sum(exped, 1))
 #@register_grad SoftMax      1   (a = maximum())
 
+
+
+
 ###########
 # Scalars #
 ###########
 abstract ScalarOp <: OpType
+
 type Add <: ScalarOp end
 type Sub <: ScalarOp end
 type Mul <: ScalarOp end
@@ -352,11 +364,11 @@ type Geq <: ScalarOp end
 
 type Sigmoid <: ScalarOp end
 
-@register_op Add         (+)          2
-@register_op Sub         (-)          2
-@register_op Mul         (*)          2
-@register_op Div         (/)          2
-@register_op Pow         (^)          2
+@register_op Add     (+)          2
+@register_op Sub     (-)          2
+@register_op Mul     (*)          2
+@register_op Div     (/)          2
+@register_op Pow     (^)          2
 
 @register_op Neg         (-)          1
 @register_op Sign        sign         1
@@ -366,25 +378,55 @@ type Sigmoid <: ScalarOp end
 @register_op Cos         cos          1
 @register_op Abs         abs          1
 
-@register_op Max         max          2
-@register_op Min         min          2
+@register_op Max     max          2
+@register_op Min     min          2
 
 # Would like to use == etc., but spell out for now
-@register_op Eq          (eq)         2
-@register_op Neq         (neq)        2
-@register_op Le          (le)         2
-@register_op Leq         (leq)        2
-@register_op Ge          (ge)         2
-@register_op Geq         (geq)        2
+@register_op Eq      (eq)         2
+@register_op Neq     (neq)        2
+@register_op Le      (le)         2
+@register_op Leq     (leq)        2
+@register_op Ge      (ge)         2
+@register_op Geq     (geq)        2
 
 @register_op Sigmoid     sigmoid      1
 
-call(op::Add,  a::TensorValue, b::TensorValue)  = a + b
-call(op::Sub,  a::TensorValue, b::TensorValue)  = a - b
-call(op::Mul,  a::TensorValue, b::TensorValue)  = a * b
-call(op::Div,  a::TensorValue, b::TensorValue)  = a / b
-call(op::Pow,  a::TensorValue, b::TensorValue)  = a ^ b
+# Basically reimplementing Base here
+function elwise(op::Function, a::Real, b::Real)
+    op(a, b)
+end
 
+# TODO Similar isn't really right - should have proper type
+function elwise(op::Function, a::Real, b::Array)
+    out = similar(b)
+    for i = eachindex(b)
+        @inbounds out[i] = op(a, b[i])
+    end
+    reshape(out, size(b))
+end
+function elwise(op::Function, a::Array, b::Real)
+    out = similar(a)
+    for i = eachindex(a)
+        @inbounds out[i] = op(a[i], b)
+    end
+    reshape(out, size(a))
+end
+function elwise(op::Function, a::Array, b::Array)
+    @assert size(a) == size(b)
+    out = similar(a)
+    for i = eachindex(a)
+        @inbounds out[i] = op(a[i], b[i])
+    end
+    reshape(out, size(a))
+end
+
+call(op::Add,  a::TensorValue, b::TensorValue)  = elwise(+, a, b)
+call(op::Sub,  a::TensorValue, b::TensorValue)  = elwise(-, a, b)
+call(op::Mul,  a::TensorValue, b::TensorValue)  = elwise(*, a, b)
+call(op::Div,  a::TensorValue, b::TensorValue)  = elwise(/, a, b)
+call(op::Pow,  a::TensorValue, b::TensorValue)  = elwise(^, a, b)
+
+# These are autobroadcast
 call(op::Neg,  a::TensorValue)           = -a
 call(op::Sign, a::TensorValue)           = sign(a)
 call(op::Exp,  a::TensorValue)           = exp(a)
@@ -393,36 +435,27 @@ call(op::Sin,  a::TensorValue)           = sin(a)
 call(op::Cos,  a::TensorValue)           = cos(a)
 call(op::Abs,  a::TensorValue)           = abs(a)
 
-call(op::Max,  a::TensorValue, b::TensorValue)  = max(a,b)
-call(op::Min,  a::TensorValue, b::TensorValue)  = min(a,b)
+call(op::Max,  a::TensorValue, b::TensorValue)  = elwise(max, a, b)
+call(op::Min,  a::TensorValue, b::TensorValue)  = elwise(min, a, b)
 
-call(op::Eq,   a::Real, b::Real)  = a == b
-call(op::Neq,  a::Real, b::Real)  = a != b
-call(op::Le,   a::Real, b::Real)  = a < b
-call(op::Leq,  a::Real, b::Real)  = a <= b
-call(op::Ge,   a::Real, b::Real)  = a > b
-call(op::Geq,  a::Real, b::Real)  = a >= b
+call(op::Eq,   a::TensorValue, b::TensorValue)  = elwise(==, a, b)
+call(op::Neq,  a::TensorValue, b::TensorValue)  = elwise(!=, a, b)
+call(op::Le,   a::TensorValue, b::TensorValue)  = elwise(<, a, b)
+call(op::Leq,  a::TensorValue, b::TensorValue)  = elwise(<=, a, b)
+call(op::Ge,   a::TensorValue, b::TensorValue)  = elwise(>, a, b)
+call(op::Geq,  a::TensorValue, b::TensorValue)  = elwise(>=, a, b)
 
+call(op::Sigmoid, a::TensorValue) = (1.0 ./ (1.0 + exp(-a))) 
 
-# Eh... This doesn't require equal dimensions.  implicit broadcasting is eh
-call(op::Eq,   a::TensorValue, b::TensorValue)  = a .== b
-call(op::Neq,  a::TensorValue, b::TensorValue)  = a .!= b
-call(op::Le,   a::TensorValue, b::TensorValue)  = a .< b
-call(op::Leq,  a::TensorValue, b::TensorValue)  = a .<= b
-call(op::Ge,   a::TensorValue, b::TensorValue)  = a .> b
-call(op::Geq,  a::TensorValue, b::TensorValue)  = a .>= b
-
-call(op::Sigmoid, a::Real) = (1.0 ./ (1.0 + exp(-a))) 
-
-
-@register_grad Add ds ds
-@register_grad Sub (ds) (-ds)
-@register_grad Mul (b * ds) (a * ds)
-@register_grad Div (ds / b) (-(ds * a) / (b * b))
-@register_grad Pow (ds * b * a ^ (b - cg.constant(1.0))) (ds * log(a) * (a ^ b))
+# TODO: This is absolutely definitely not a good long term solution
+@register_grad Add bg(ds, a) bg(ds, b)
+@register_grad Sub bg(ds, a) bg(-ds, b)
+@register_grad Mul bg(b * ds, a) bg(a * ds, b)
+@register_grad Div bg(ds / b, a) bg(-(ds * a) / (b * b), b)
+@register_grad Pow bg(ds * b * a ^ (b - cg.constant(1.0)), a) bg(ds * log(a) * (a ^ b), b)
 # TODO: make the constants the proper type
 
-@register_grad Sign zeros_like(a)
+@register_grad Sign fill_like(cg.constant(0), a)
 @register_grad Neg (-ds)
 @register_grad Exp (exp(a) * ds)
 @register_grad Log (ds / a)
@@ -430,78 +463,104 @@ call(op::Sigmoid, a::Real) = (1.0 ./ (1.0 + exp(-a)))
 @register_grad Cos (-sin(a) * ds)
 @register_grad Abs (sign(a) * ds)
 
-@register_grad Max (eq(out, a) * ds) (eq(out, b))
-@register_grad Min (eq(out, a) * ds) (eq(out, b))
+@register_grad Max bg(eq(out, a) * ds, a) bg(eq(out, b) * ds, b)
+@register_grad Min bg(eq(out, a) * ds, a) bg(eq(out, b) * ds, b)
 
 @register_grad Sigmoid (sigmoid(a) * (cg.constant(1.0) - sigmoid(a)) * ds)
 
 ################
 # Broadcasting #
 ################
+# This is used for arrays that are different sizes.
+# Broadcast singleton dimensions to the same size
+# TODO decision: Should all broadcasts be explicit?
+# Handling broadcasting is surprisingly tricky, especially grads (compile time v. runtime)
+
 # Some way to specialize {T <: ScalarOp}?
 type Broadcast <: OpType
     op::ScalarOp
 end
-type BroadcastGrad <: OpType end
+type BroadcastGrad <: OpType
+    op::ScalarOp
+end
 
 function broadcastop(op::ScalarOp, a::Node, b::Node)
     Node(Broadcast(op), [a, b])
 end
+
+function broadcastgrad(op::ScalarOp, a::Node, b::Node)
+    Node(Broadcast(op), [a, b])
+end
+
+function broadcast(name::AbstractString, a::Node, b::Node)
+    if name== "+"
+        op = Add()
+    elseif name == "-"
+        op = Sub()
+    elseif name == "*"
+        op = Mul()
+    elseif name == "/"
+        op = Div()
+    elseif name == "^"
+        op = Pow()
+    end
+    broadcastop(op, a, b)
+end
+
 @register_impl Broadcast 2 broadcast(op.op, a, b)
 @register_grad Broadcast broadcastgrad(ds, a) broadcastgrad(ds, b)
+# ^ This is wrong - doesn't actually use the op.grad
 
-# TODO: This is a hack and I don't like it
+# TODO: This feels like a hack even if it works
 # In place until shape inference exists?
 # args: [out, arg to go back to]
 # Alternative is some explicit copying
 @register_op BroadcastGrad broadcastgrad 2
+bg = broadcastgrad
 
 # What axes to sum to get from cur_dim to target
 function get_sum_dims(curdim::Vector{Int}, targetdim::Vector{Int})
     dims = Vector{Int64}()
     nt = length(targetdim)
     nc = length(curdim)
-    for dim = 1:nt
-        if targetdim[dim] == 1
+    @assert nt <= nc
+    for dim = 1:nc
+        if dim > nt && curdim[dim] > 1
+            # Sum along all implicitly 1 axes of target
             push!(dims, dim)
-        end
-    end
-    if nc < nt
-        for dim = (nc + 1):nt
-            push!(dims)
+        elseif curdim[dim] != targetdim[dim] == 1
+            push!(dims, dim)
         end
     end
     dims
 end
 
-function _sum(a::AbstractArray, dims::Int...)
-    length(dims) == 0 ? sum(a) : sum(a, dims)
+# Sum axes of "from" to match dimensions of "to"
+function call(op::BroadcastGrad, from::Real, to::Real)
+    from
 end
 
-# Sum axes of "from" to match dimensions of "to"
-function call(op::BroadcastGrad, from::TensorValue, to::TensorValue)
+function call(op::BroadcastGrad, from::Real, to::Array)
+    fill(from, size(to)...)
+end
+
+function call(op::BroadcastGrad, from::Array, to::Real)
+    sum(from)
+end
+
+function call(op::BroadcastGrad, from::Array, to::Array)
     fshape = size(from)
     tshape = size(to)
-    println(fshape)
-    println(tshape)
-    if length(tshape) == 0
-        return sum(from)
-    else
-        dims = get_sum_dims(collect(fshape), collect(tshape))
-        println(dims)
-        return sum(from, dims)
+    if fshape == tshape
+        return from
     end
+    dims = get_sum_dims(collect(fshape), collect(tshape))
+    return sum(from, dims)
 end
 
 
-# Simplify ops to always assume broadcasting
-
-# TODO: This actually makes gradients difficult in some cases (e.g. sum)
 #TODO question: Is {T <: ScalarOp}(op::T) more efficient than op::ScalarOp?  Look at codegen
 #TODO Just calling sin(x) is faster than broadcast(sin, x) by many times.  Do this instead for most ops
-# call{T <: ScalarOp}(op::T, arrs::AbstractArray...) = broadcast(op, arrs...)
-# call{T <: ScalarOp}(op::T, a::AbstractArray, b::Real) = broadcast(op, a, b)
-# call{T <: ScalarOp}(op::T, a::Real, b::AbstractArray) = broadcast(op, a, b)
 
 ###############
 # Complex ops #
@@ -516,9 +575,13 @@ end
 function softmax(node::Node)
     # max = maximum(node, constant(1))  # Maximum columnwise
     # exped = exp(node - max)
+    node = print(node)
     exped = exp(node)
+    exped = print(exped)
     summed = sum(exped, constant(1))
-    div = exped / summed
+    summed = print(summed)
+    div = broadcast("/", exped, summed)
+    div = print(div)
     group_between([node], [div], string(gensym(:softmax)), include_in=false)
     div
 end
