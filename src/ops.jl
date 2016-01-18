@@ -68,7 +68,6 @@ type InPlaceAdd <: OpType end
 type Mean <: OpType end
 type Sum <: OpType end
 type Maximum <: OpType end
-type RepeatTo <: OpType end
 
 # These are mainly for testing
 type GetIndex <: OpType end
@@ -240,8 +239,6 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 @register_op GetIndex    getindex     2
 @register_op SetIndex    setindex     3
 
-@register_op RepeatTo    repeatto     2 # input array, target shp - expand singleton dims
-
 ################################
 
 @register_impl Print        1   (println(a); a)
@@ -273,36 +270,6 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 @register_impl GetIndex      2   (a[b])
 @register_impl SetIndex      3   (t = copy(a); t[b] = c; t)
 
-
-function call(op::RepeatTo, a::Real, dim::Array)
-    fill(a, dim...)
-end
-
-# Repeats singleton dimensions of the given array to given dimensions
-function call(op::RepeatTo, a::Array, dim::Array)
-    cdim = size(a)
-    ncurdim = length(cdim)
-    @assert length(size(dim)) == 1  # Is a vector
-    @assert length(dim) >= length(cdim)  # target has at least as many dimensions
-    repcount = zeros(dim)
-    for i = 1:length(dim)
-        if i > ncurdim
-            # Expand all implicitly 1 dimensions
-            repcount[i] = dim[i]
-        elseif cdim[i] == 1
-            # Expand all singleton dims
-            repcount[i] = dim[i]
-        elseif cdim[i] == dim[i]
-            # Leave rest the same
-            repcount[i] = 1
-        else
-            # All all nonsingleton dimensions must be the same
-            @assert false
-        end
-    end
-    repeat(a, inner=repcount)
-end
-
 ################################
 
 @register_grad Print ds
@@ -314,7 +281,7 @@ end
 
 # This is wrong for edge cases
 @register_grad Maximum  (eq(a, out) * ds)
-@register_grad Maximum  broadcast(Mul(), broadcast(Eq(), a, out), ds) (b)  # 2nd one should be undefined
+@register_grad Maximum  broadcast("*", broadcast("==", a, out), ds) (b)  # 2nd one should be undefined
 
 # Incredibly inefficient, but mostly for testing
 # TODO: 0s Replace with nondiff
@@ -471,25 +438,90 @@ call(op::Sigmoid, a::TensorValue) = (1.0 ./ (1.0 + exp(-a)))
 ################
 # Broadcasting #
 ################
+type RepeatTo <: OpType end
+@register_op RepeatTo    repeatto     2 # input array, target shp - expand singleton dims
+@register_grad RepeatTo broadcastgrad(ds, a) constant(0.0) # Nondiff
+
+# Leave scalars as scalars if dim = ()
+function call(op::RepeatTo, a::Real, dim::Array)
+    length(dim) == 0 ? a : fill(a, dim...)
+end
+
+# Repeats singleton dimensions of the given array to given dimensions
+function call(op::RepeatTo, a::Array, dim::Array)
+    cdim = collect(size(a))
+    ncurdim = length(cdim)
+    @assert length(size(dim)) == 1  # Is a vector
+    @assert length(dim) >= length(cdim)  # target has at least as many dimensions
+    if cdim == dim
+        return a
+    end
+    repcount = zeros(dim)
+    for i = 1:length(dim)
+        if i > ncurdim
+            # Expand all implicitly 1 dimensions
+            repcount[i] = dim[i]
+        elseif cdim[i] == 1
+            # Expand all singleton dims
+            repcount[i] = dim[i]
+        elseif cdim[i] == dim[i]
+            # Leave rest the same
+            repcount[i] = 1
+        else
+            # All all nonsingleton dimensions must be the same
+            @assert false
+        end
+    end
+    repeat(a, inner=repcount)
+end
+
+
 # This is used for arrays that are different sizes.
 # Broadcast singleton dimensions to the same size
-# TODO decision: Should all broadcasts be explicit?
-# Handling broadcasting is surprisingly tricky, especially grads (compile time v. runtime)
 
-# Some way to specialize {T <: ScalarOp}?
-type Broadcast <: OpType
-    op::ScalarOp
+# Calculate a common shape by expanding singleton dimensions of arguments
+type BroadcastShape <: OpType end
+@register_op BroadcastShape broadcastshape 2
+@register_grad BroadcastShape cg.constant(0.0) cg.constant(0.0)  # Really nondiff?
+
+function call(op::BroadcastShape, a::Array, b::Real)
+    collect(size(a))
 end
-type BroadcastGrad <: OpType
-    op::ScalarOp
+
+function call(op::BroadcastShape, a::Real, b::Array)
+    collect(size(b))
+end
+
+function call(op::BroadcastShape, a::Array, b::Array)
+    as = size(a)
+    bs = size(b)
+
+    if length(bs) > length(as)
+        as, bs = bs, as
+        a, b = b, a
+    end
+    out = ones(Int, length(as))
+    for i = 1:length(as)
+        if i > length(bs)
+            out[i] = as[i]
+        elseif as[i] == bs[i]
+            out[i] = as[i]
+        elseif as[i] == 1
+            out[i] = bs[i]
+        elseif bs[i] == 1
+            out[i] = as[i]
+        else
+            throw(DimensionMismatch("Cannot broadcast arrays"))
+        end
+    end
+    out
 end
 
 function broadcastop(op::ScalarOp, a::Node, b::Node)
-    Node(Broadcast(op), [a, b])
-end
-
-function broadcastgrad(op::ScalarOp, a::Node, b::Node)
-    Node(Broadcast(op), [a, b])
+    common_shape = broadcastshape(a, b)
+    ba = repeatto(a, common_shape)
+    bb = repeatto(b, common_shape)
+    Node(op, [ba, bb])
 end
 
 function broadcast(name::AbstractString, a::Node, b::Node)
@@ -503,18 +535,20 @@ function broadcast(name::AbstractString, a::Node, b::Node)
         op = Div()
     elseif name == "^"
         op = Pow()
+    elseif name == "=="
+        op = Eq()
     end
     broadcastop(op, a, b)
 end
 
-@register_impl Broadcast 2 broadcast(op.op, a, b)
-@register_grad Broadcast broadcastgrad(ds, a) broadcastgrad(ds, b)
-# ^ This is wrong - doesn't actually use the op.grad
-
-# TODO: This feels like a hack even if it works
-# In place until shape inference exists?
+# Sums along axes that were broadcast to get singleton dims back
 # args: [out, arg to go back to]
-# Alternative is some explicit copying
+# For broadcastgrad(a, b) where a = [3,5], b=[1,5], sum(a, 1) to get [1,5] output
+# In place until shape inference exists?
+# Some way to specialize {T <: ScalarOp}?
+type BroadcastGrad <: OpType
+end
+
 @register_op BroadcastGrad broadcastgrad 2
 bg = broadcastgrad
 
@@ -573,15 +607,20 @@ function crossentropy(label::Node, prediction::Node)
 end
 
 function softmax(node::Node)
-    # max = maximum(node, constant(1))  # Maximum columnwise
-    # exped = exp(node - max)
-    node = print(node)
     exped = exp(node)
-    exped = print(exped)
     summed = sum(exped, constant(1))
-    summed = print(summed)
     div = broadcast("/", exped, summed)
-    div = print(div)
+    group_between([node], [div], string(gensym(:softmax)), include_in=false)
+    div
+end
+
+function softmax_stable(node::Node)
+    @show node
+    max = maximum(node, constant(1))  # Maximum columnwise
+    @show max
+    exped = exp(broadcast("-", node, max))
+    summed = sum(exped, constant(1))
+    div = broadcast("/", exped, summed)
     group_between([node], [div], string(gensym(:softmax)), include_in=false)
     div
 end
