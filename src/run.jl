@@ -97,7 +97,7 @@ end
 # TODO: Will want the ability to provide ops that feed a placeholder variable
 function interpret(session::Session, outputs::Vector{Node} ; debug = false)
     for node in getorder(session, outputs)
-        debug && print("Evaluating: ")
+        debug && print("==============\nEvaluating: ")
         debug && @show node
         # Handle various input types separately from normal
         if isa(node.op, Placeholder)
@@ -120,7 +120,10 @@ function interpret(session::Session, outputs::Vector{Node} ; debug = false)
         else
             args = Vector{TensorValue}()
             for arg = node.inputs
-                @assert haskey(session.values, arg)
+                if !haskey(session.values, arg)
+                    @show arg
+                    @assert false && "This arg does not exist"
+                end
                 push!(args, get(session.values, arg, :impossible))
             end
             debug && println(node.name)
@@ -129,12 +132,24 @@ function interpret(session::Session, outputs::Vector{Node} ; debug = false)
                 @show node
                 @show node.op
                 @show args
+                sizes = [size(arg) for arg in args]
+                @show sizes
             end
-            out = node.op(args...)
-            if debug
-                @show out
+            try
+                out = node.op(args...)
+                session.values[node] = out
+                if debug
+                    @show out
+                    @show size(out)
+                end
+            catch err
+                @show err
+                @show node
+                for arg = args
+                    @show typeof(arg)
+                    @show size(arg)
+                end
             end
-            session.values[node] = out
         end
     end
     [session.values[output] for output in outputs]

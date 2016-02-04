@@ -7,10 +7,11 @@ function softmax_regression(input_dim::Int, output_dim::Int, step_size::Float64)
     W1 = cg.variable(cg.zeros(cg.constant([output_dim, input_dim])), "W1")
     b1 = cg.variable(cg.zeros(cg.constant(output_dim)), "b1")
 
-    input = cg.placeholder([input_dim], "input");
-    label = cg.placeholder([output_dim], "label");
-    unnormed = (W1 * input) + b1
+    input = cg.placeholder([input_dim], "input")
+    label = cg.placeholder([output_dim], "label")
+    unnormed = cg.broadcast("+", cg.matmul(W1, input), b1)
     output = cg.softmax(unnormed)
+    #output = cg.softmax_stable(unnormed)
     loss = cg.crossentropy(label, output)
 
     train = cg.sgd_optimizer(loss, [W1, b1], cg.constant(step_size))
@@ -18,13 +19,11 @@ function softmax_regression(input_dim::Int, output_dim::Int, step_size::Float64)
     (input, label, output, loss, train)
 end
 
-function onehot(labels)
+function onehot(labels::AbstractArray; min::Int = 0, max::Int = 9)
     labels = round(Int, labels)
-    min = minimum(labels)
-    max = maximum(labels)
-    result = zeros(Int, max - min + 1, length(labels))
+    result = zeros(Float64, max - min + 1, length(labels))
     for (i, label) in enumerate(labels)
-        result[label - min + 1, i] = 1
+        result[label - min + 1, i] = 1.0
     end
     result
 end

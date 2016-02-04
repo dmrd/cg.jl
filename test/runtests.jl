@@ -52,7 +52,7 @@ function test_gradients(out::cg.Node, shape=[5] ; filltype::Symbol=:range, iters
 
         for (input,grad) = zip(inputs, gradients)
             numeric = cg.numeric_grad(session, out, input, 0.0000001)
-            symbolic = cg.interpret(session, grad)
+            symbolic = cg.interpret(session, grad, debug=debug)
             if debug
                 @show session.values[input]
                 @show session.values[out]
@@ -75,9 +75,9 @@ function test_scalar_gradients()
     # Scalar ops
     @show test_gradients(sum(i() + i()))
     @show test_gradients(sum(i() - i()))
-    @show test_gradients(sum(i() * i()), debug=true)
+    @show test_gradients(sum(i() * i()))
     @show test_gradients(sum(i() / i()))
-    @show test_gradients(sum(i() ^ cg.constant(3.0)), debug=true)
+    @show test_gradients(sum(i() ^ cg.constant(3.0)))
     @show test_gradients(sum(cg.constant(3.0) ^ i()))
 
     @show test_gradients(sum(-i()))
@@ -108,7 +108,7 @@ function test_shape_gradients()
                       sum(op(i(), cg.constant(1))), sum(op(i(), cg.constant(2)))]
             for filltype = [:ones, :rand, :range]
                 @show (op, graph, filltype)
-                #test_gradients(graph, shape, filltype=filltype, iters=100)
+                test_gradients(graph, shape, filltype=filltype, iters=100)
             end
         end
     end
@@ -124,8 +124,13 @@ end
 
 function test_other_gradients()
     show_test("other gradients")
+    a = cg.constant(rand(4,5))
+    b = i()
     # Mat mul
-    @show test_gradients(cg.dot(cg.t(i()), i()))
+    @show test_gradients(cg.sum(cg.matmul(cg.t(b), b)), [4, 3])
+    @show test_gradients(cg.sum(cg.matmul(b, cg.t(b))), [4, 3])
+    @show test_gradients(cg.sum(cg.matmul(cg.t(a), b)), [4, 3])
+    @show test_gradients(cg.sum(cg.matmul(cg.t(b), a)), [4, 3])
 end
 
 function test_broadcast()
@@ -140,7 +145,7 @@ function test_broadcast()
         for filltype in [:ones, :range, :rand]
             @show test
             @show filltype
-            @show test_gradients(cg.sum(test), [3,5], debug=false, filltype=filltype)
+            @show test_gradients(cg.sum(test), [3,5], filltype=filltype)
         end
     end
 end
@@ -163,11 +168,11 @@ function test_nn()
         softmax_crossentropy = cg.crossentropy(sci1, cg.softmax(sci2))
 
         softmax_t(x) = exp(x) ./ sum(exp(x), 1)
-        crossentropy_t(p, q) = -sum(p .* log(q), 1)
+        crossentropy_t(p, q) = -sum(p .* log(q))
         softmax_crossentropy_t(p, q) = crossentropy_t(p, softmax_t(q))
         shape = [5,10]
-        a1 = genarg(shape, :ones, rand_offset=0)
-        a2 = genarg(shape, :ones, rand_offset=0)
+        a1 = genarg(shape, :rand, rand_offset=0)
+        a2 = genarg(shape, :rand, rand_offset=0)
 
         @show test_output(softmax, softmax_t, (si1, a1))
         @show test_output(softmax_stable, softmax_t, (ssi1, a1))
@@ -182,8 +187,8 @@ function test_nn()
         @show test_gradients(sum(si1))
         scal1 = i()
         scal2 = i()
-        @show test_gradients(scal1 / (scal1 + scal2), [1], debug=true)
-        @show test_gradients(cg.getindex(broadcast("/", si1, sum(si1)), cg.constant(1)), [2], debug=true)
+        @show test_gradients(scal1 / (scal1 + scal2), [1])
+        @show test_gradients(cg.getindex(broadcast("/", si1, sum(si1)), cg.constant(1)), [2])
 
         @show test_gradients(cg.sum(softmax))
         @show test_gradients(cg.sum(softmax_stable))
@@ -225,11 +230,11 @@ function test_sum()
 end
 
 
+test_other_gradients()
 test_sum()
 test_broadcast()
 test_nn()
 test_scalar_gradients()
 test_shape_gradients()
-test_other_gradients()
 test_get_and_set_gradients()
 test_sgd_basics()

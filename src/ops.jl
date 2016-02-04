@@ -58,7 +58,7 @@ end
 type RandN <: RandomOp end
 type Copy <: ElementWise end
 
-type Dot <: OpType end  # Matrix multiply
+type MatMul <: OpType end  # Matrix multiply
 type Transpose <: OpType end
 type Sum <: OpType end
 type Dim <: OpType end
@@ -128,10 +128,10 @@ macro register_op(typ, op, narg)
 end
 
 """
-@register_grad Mul (a .* ds) (b .* ds)
+@register_grad Mul (b * ds) (a * ds)
  Expands to
 function grad(op::Mul, out::Node, ds::Node, a::Node, b::Node)
-    [a .* ds, b .* grad_out]
+    [b * ds, a * ds]
 end
 TODO: Make this take inputs[], outputs[], gradients[] explicitly as lists
 """
@@ -193,10 +193,7 @@ end
 #                type, name, args, gradients, implementation, [shape inference]
 # Todo ops:
     # boolean operators
-    # get/setindex
     # random
-    # max/min
-    # common pointwise math (e.g. exp)
 
 # noop basics
 function noop(a::Node...)
@@ -213,11 +210,14 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 @register_op Print       print        1
 @register_op Dim         dim          1
 @register_op Fill        fill         2
+zeros(a::Node) = fill(constant(0.0), a)
+ones(a::Node) = fill(constant(1.0), a)
 @register_op FillLike    fill_like    2
 @register_op Copy        copy         1
 
-@register_op Dot         dot          2
+@register_op MatMul      matmul       2
 @register_op Transpose   t            1
+@register_op Transpose   transpose    1
 @register_op Assign      (.=)         2
 @register_op InPlaceAdd  plusequals   2  # += doesn't work
 
@@ -252,7 +252,7 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 
 @register_impl Copy         1   a
 
-@register_impl Dot          2   a * b
+@register_impl MatMul       2   (a * b)
 @register_impl Transpose    1   transpose(a)
 # TODO: Run without returning anything.  Explicit NoValue
 @register_impl InPlaceAdd   2   (for i in 1:length(a); a[i] += b[i] end; 0)
@@ -273,8 +273,8 @@ fill(val::Float, shape::Array{Int}, name::AbstractString="") = fill(constant(val
 ################################
 
 @register_grad Print ds
-@register_grad Dot broadcast("*", ds, t(b)) broadcast("*", t(a), ds)
-@register_grad Transpose ds
+@register_grad MatMul matmul(ds, t(b)) matmul(t(a), ds)
+@register_grad Transpose t(ds)
 
 @register_grad Sum repeatto(ds, dim(a))
 @register_grad Sum repeatto(ds, dim(a)) (cg.constant(0)) # TODO: make axis nondiff
@@ -363,6 +363,7 @@ function elwise(op::Function, a::Real, b::Real)
     op(a, b)
 end
 
+# TODO: these are similar to broadcast in Base, but many times slower.  Why.
 # TODO Similar isn't really right - should have proper type
 function elwise(op::Function, a::Real, b::Array)
     out = similar(b)
@@ -378,6 +379,7 @@ function elwise(op::Function, a::Array, b::Real)
     end
     reshape(out, size(a))
 end
+
 function elwise(op::Function, a::Array, b::Array)
     @assert size(a) == size(b)
     out = similar(a)
@@ -559,9 +561,11 @@ function get_sum_dims(curdim::Vector{Int}, targetdim::Vector{Int})
     nc = length(curdim)
     @assert nt <= nc
     for dim = 1:nc
-        if dim > nt && curdim[dim] > 1
+        if dim > nt
             # Sum along all implicitly 1 axes of target
-            push!(dims, dim)
+            if curdim[dim] > 1
+                push!(dims, dim)
+            end
         elseif curdim[dim] != targetdim[dim] == 1
             push!(dims, dim)
         end
@@ -601,7 +605,7 @@ end
 ###############
 
 function crossentropy(label::Node, prediction::Node)
-    result = -sum(label * log(prediction), cg.constant(1))
+    result = -sum(label * log(prediction))
     group_between([label, prediction], [result], string(gensym(:crossentropy)), include_in=false)
     result
 end
