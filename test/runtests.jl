@@ -153,8 +153,6 @@ end
 function test_nn()
     show_test("nn")
 
-    tests = [cg.sum(cg.softmax(i())),
-             cg.sum(cg.crossentropy(i(), cg.softmax(i())))]
     for filltype in [:ones, :rand]
         si1 = i()
         softmax = cg.softmax(si1)
@@ -185,6 +183,7 @@ function test_nn()
         @show test_gradients(cg.sum(broadcast("/", si1, sum(si1))))
         @show test_gradients(cg.getindex(si1, cg.constant(1)))
         @show test_gradients(sum(si1))
+
         scal1 = i()
         scal2 = i()
         @show test_gradients(scal1 / (scal1 + scal2), [1])

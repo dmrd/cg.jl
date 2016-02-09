@@ -229,8 +229,6 @@ ones(a::Node) = fill(constant(1.0), a)
 
 #@register_op Relu        relu         1
 
-#@register_op SoftMax     softmax      1
-
 @register_op RandN       randn        1
 
 @register_op Maximum     maximum      1
@@ -279,11 +277,11 @@ ones(a::Node) = fill(constant(1.0), a)
 @register_grad Sum repeatto(ds, dim(a))
 @register_grad Sum repeatto(ds, dim(a)) (cg.constant(0)) # TODO: make axis nondiff
 
-# This is wrong for edge cases
+# TODO: I believe this is wrong for some edge cases
 @register_grad Maximum  (eq(a, out) * ds)
 @register_grad Maximum  broadcast("*", broadcast("==", a, out), ds) (b)  # 2nd one should be undefined
 
-# Incredibly inefficient, but mostly for testing
+# Incredibly inefficient, but mostly for testing/debugging
 # TODO: 0s Replace with nondiff
 @register_grad GetIndex  (t = fill(cg.constant(0.0), dim(a)); setindex(t, b, ds)) (cg.constant(0))
 @register_grad SetIndex  (setindex(ds, b, cg.constant(0.0))) (cg.constant(0)) (getindex(ds, b))
@@ -291,14 +289,6 @@ ones(a::Node) = fill(constant(1.0), a)
 # TODO How to treate OnesLike etc. in gradient computations?
 # TODO: Add actual GradUndefined
 ## TODO: May want to start grouping together like this
-
-type Softmax <: OpType end
-#@register_op Softmax softmax 1
-#@register_impl SoftMax      1   (m = maximum(a, 1); subbed = a .- m; exped = exp(subbed); exped ./ sum(exped, 1))
-#@register_grad SoftMax      1   (a = maximum())
-
-
-
 
 ###########
 # Scalars #
@@ -416,6 +406,7 @@ call(op::Geq,  a::TensorValue, b::TensorValue)  = elwise(>=, a, b)
 
 call(op::Sigmoid, a::TensorValue) = (1.0 ./ (1.0 + exp(-a))) 
 
+# size(a) == size(b) or only one of them is a scalar
 # TODO: This is absolutely definitely not a good long term solution
 @register_grad Add bg(ds, a) bg(ds, b)
 @register_grad Sub bg(ds, a) bg(-ds, b)
@@ -619,9 +610,7 @@ function softmax(node::Node)
 end
 
 function softmax_stable(node::Node)
-    @show node
     max = maximum(node, constant(1))  # Maximum columnwise
-    @show max
     exped = exp(broadcast("-", node, max))
     summed = sum(exped, constant(1))
     div = broadcast("/", exped, summed)
@@ -642,7 +631,7 @@ end
 
 function mean_squared_error(a::Node, b::Node)
     diff = a - b
-    sq = diff .* diff
+    sq = diff * diff
     mean(sq)
 end
 

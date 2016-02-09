@@ -149,6 +149,7 @@ function interpret(session::Session, outputs::Vector{Node} ; debug = false)
                     @show typeof(arg)
                     @show size(arg)
                 end
+                @assert false && "Error"
             end
         end
     end
